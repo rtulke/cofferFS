@@ -19,6 +19,12 @@ nix = { version = "0.31.3", features = ["fs"] }
 rpassword = "7.5.4"
 rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
 
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
 [package.metadata.deb]
 maintainer = "Robert Tulke <turo@naz.ch>"
 copyright = "2026, Robert Tulke <turo@naz.ch>"
