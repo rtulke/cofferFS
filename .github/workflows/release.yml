@@ -102,14 +102,17 @@ jobs:
           name: deb-${{ matrix.id }}
 
       # Run the test distro as a plain `docker run` step rather than a job-
-      # level `container:` - GitHub's job-container wrapper silently drops
-      # (or otherwise doesn't honor) --security-opt on hosted runners: with
-      # only --device/--cap-add set via `container: options:`, mount() was
-      # still rejected with "Permission denied" by Docker's default seccomp
-      # profile, identically before and after adding --security-opt
-      # seccomp=unconfined there. A manual `docker run` (same approach as
-      # packaging/test-install.sh, which works locally) gives full control
-      # over every flag.
+      # level `container:`, so every flag docker actually gets is explicit
+      # and under our control (GitHub's job-container `options:` field is
+      # murkier about what it forwards). Mounting FUSE here needs all four:
+      # --device (else "device not found, try 'modprobe fuse' first"),
+      # --cap-add SYS_ADMIN (else mount() itself is rejected), and BOTH
+      # --security-opt seccomp=unconfined AND apparmor=unconfined - with
+      # apparmor left at Docker's default `docker-default` profile, mount()
+      # still failed with "Permission denied" even with the capability and
+      # seccomp already unconfined (that profile denies `mount,` outright,
+      # independent of capabilities/seccomp). Confirmed by hitting each of
+      # these failures in turn on this exact job before adding the next flag.
       #
       # A real `apt-get install`, not `dpkg -i`, so declared Depends:
       # actually have to resolve against this distro's package archive -
@@ -122,7 +125,8 @@ jobs:
       - name: Install and smoke-test the package the same way an end user would
         run: |
           docker run --rm \
-            --cap-add SYS_ADMIN --device /dev/fuse --security-opt seccomp=unconfined \
+            --cap-add SYS_ADMIN --device /dev/fuse \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
             -v "$PWD:/work:ro" \
             ${{ matrix.image }} \
             bash -euxc '

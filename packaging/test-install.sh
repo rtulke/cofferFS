@@ -29,7 +29,8 @@ for id in "${!TARGET_IMAGES[@]}"; do
     echo "== $id ($img) <- $DEB"
     echo "=========================================================="
     "$RUNTIME" run --rm \
-        --cap-add SYS_ADMIN --device /dev/fuse --security-opt seccomp=unconfined \
+        --cap-add SYS_ADMIN --device /dev/fuse \
+        --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
         -v "$PWD/$DEB:/tmp/cryptc.deb:Z,ro" \
         "$img" \
         bash -euxc '
