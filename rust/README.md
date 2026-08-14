@@ -3,11 +3,11 @@
 A growable, encrypted, single-file container you create and mount **as a
 normal user — no root, no sudo**. Backed by SQLCipher (statically bundled,
 no runtime dependency on a system SQLCipher package) and mounted via FUSE.
-This is the compiled, packaged version of cryptc; a
-[Python reference implementation](../cryptc) with identical behavior and
-on-disk format lives in the parent directory (both read/write the same
-container file, and either can be used to `check`/`backup`/`mount` a
-container the other created).
+This is the compiled, packaged version of cryptc, and the only
+implementation published in this repository. It started from a Python
+reference implementation with identical behavior and on-disk format
+(the two can `check`/`backup`/`mount` a container the other created), kept
+by the maintainer outside this repository.
 
 ```
 cryptc create vault.cryptc
@@ -36,6 +36,7 @@ Grab the matching `.deb` for your distro from the
 ./setup.sh          # Debian 12/13, Ubuntu 24.04/26.04 - see below
 make build           # after setup.sh once, this is all you need
 sudo make install    # optional: installs to /usr/local/bin/cryptc
+                      # + the cryptc(1) man page
 ```
 
 `setup.sh` is idempotent (safe to re-run) and does three things:
@@ -186,6 +187,9 @@ non-zero).
 natively inside that distro's own container, via
 [cargo-deb](https://github.com/kornelski/cargo-deb). Output goes to
 `dist/cryptc_<version>_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb`.
+Every package also installs the `cryptc(1)` man page
+(`packaging/cryptc.1`, gzipped by `make man` before `cargo deb` runs - see
+the Makefile) to `/usr/share/man/man1/`.
 
 ```bash
 packaging/build-deb.sh          # -> dist/cryptc_*_<id>_amd64.deb (all 4)

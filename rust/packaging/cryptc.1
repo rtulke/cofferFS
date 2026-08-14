@@ -1,0 +1,166 @@
+.TH CRYPTC 1 "2026-08-14" "cryptc 0.1.0" "User Commands"
+.SH NAME
+cryptc \- growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)
+.SH SYNOPSIS
+.B cryptc create
+.I file
+.RB [ \-\-max\-size
+.IR SIZE ]
+.br
+.B cryptc mount
+.I file mountpoint
+.RB [ \-\-foreground ]
+.br
+.B cryptc umount
+.I mountpoint
+.br
+.B cryptc check
+.I file
+.br
+.B cryptc backup
+.I file dest
+.br
+.B cryptc passwd
+.I file
+.br
+.B cryptc info
+.I file
+.SH DESCRIPTION
+.B cryptc
+creates a single-file encrypted container that any user can create and
+mount without root or sudo. Directories and files are rows in a
+.BR SQLCipher (3)
+(encrypted SQLite) database; file content is stored in 128\ KiB chunks.
+Mounting is done via
+.BR FUSE (4),
+so a mount is owned by, and only accessible to, the user who created it.
+.PP
+The container has no fixed size: SQLite simply extends the backing file
+as data is written, unless a ceiling is set at creation time with
+.BR \-\-max\-size .
+Once mounted, the container behaves like an ordinary directory \-
+.BR cp (1),
+.BR mv (1),
+.BR rsync (1)
+and file managers all work normally against it.
+.PP
+Every command that opens an existing container (all except
+.BR create )
+prompts for the container password on the controlling terminal, with
+input masked. If standard input is not a terminal (piped or scripted
+use), the password is instead read as a single plain-text line from
+stdin. The password is never accepted as a command-line argument, so it
+cannot leak via
+.BR ps (1)
+output or shell history.
+.SH COMMANDS
+.TP
+.BI "create " file " [\-\-max\-size " SIZE ]
+Create a new container at
+.IR file .
+Prompts for the password twice (with confirmation). By default the
+container grows until the host disk is full; pass
+.B \-\-max\-size
+.RI ( SIZE
+is a plain byte count or a number suffixed with
+.BR K / M / G / T ,
+e.g.
+.BR 10G )
+to reject writes past a fixed ceiling with ENOSPC instead.
+.TP
+.BI "mount " file " " mountpoint " [\-\-foreground]"
+Mount
+.I file
+at
+.I mountpoint
+as the current user.
+.I mountpoint
+is created if missing and must be empty. By default
+.B cryptc
+daemonizes and returns control to the shell immediately; pass
+.B \-\-foreground
+to keep it attached (useful for debugging \- errors and FUSE
+diagnostics print to the terminal instead of being discarded).
+.TP
+.BI "umount " mountpoint
+Unmount a container previously mounted at
+.IR mountpoint .
+Shells out to
+.BR fusermount3 (1)
+(falling back to
+.B fusermount
+or
+.BR umount (8)
+if unavailable).
+.TP
+.BI "check " file
+Verify container integrity without modifying it: SQLCipher's per-page
+HMAC check followed by SQLite's structural
+.B integrity_check
+(authoritative for containers past 4\ GB \- see
+.B BUGS
+below). Exits non-zero if either check finds a real problem.
+.TP
+.BI "backup " file " " dest
+Write a byte-consistent copy of
+.I file
+to
+.I dest
+using SQLite's online backup API. Safe to run while
+.I file
+is mounted and being actively written to.
+.TP
+.BI "passwd " file
+Change the container password. Prompts for the current password, then
+the new password twice (with confirmation).
+.TP
+.BI "info " file
+Print on-disk size, logical data used, the configured size ceiling (if
+any), and directory/file/symlink counts.
+.SH EXIT STATUS
+.B 0
+on success.
+.B cryptc check
+exits
+.B 1
+if it finds a genuine HMAC failure or a failing structural integrity
+check. Other commands exit non-zero on any error (wrong password,
+mountpoint not empty, I/O failure, etc.), with a message on stderr.
+.SH FILES
+.TP
+.I vault.cryptc
+The container itself: a single SQLCipher (encrypted SQLite) database
+file.
+.TP
+.IR vault.cryptc \-wal ", " vault.cryptc \-shm
+SQLite's Write-Ahead Log and shared-memory index, present alongside the
+container while it is open (mounted, or mid-command). Do not delete
+these while the container is in use; a clean unmount checkpoints and
+removes them.
+.SH SECURITY
+No root or sudo is required to create or mount a container. Unix
+permission bits stored inside a container are recorded and reported but
+.B not
+enforced: whoever supplies the correct password gets full read/write
+access to everything inside. This matches a personal-container use case
+(comparable to VeraCrypt), not a multi-user shared filesystem. The FUSE
+mount itself is only accessible to the mounting user by default.
+.SH BUGS
+SQLCipher has a confirmed upstream bug where
+.B "PRAGMA cipher_integrity_check"
+misreports every page past the 4\ GB mark as HMAC-failed on containers
+larger than that, independent of this project (reproduced across three
+separate SQLCipher builds).
+.B cryptc check
+detects this specific false-positive pattern and treats the structural
+.B integrity_check
+(which actually decrypts and verifies every page) as authoritative, so
+it will not report a large, healthy container as corrupt \- while still
+correctly failing on real corruption anywhere in the file.
+.SH SEE ALSO
+Full documentation, source, and the container's on-disk format:
+.br
+.UR https://github.com/rtulke/cryptc
+.UE
+.SH AUTHOR
+Robert Tulke <turo@naz.ch>

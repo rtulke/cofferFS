@@ -62,6 +62,10 @@ jobs:
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked --version "$CARGO_DEB_VERSION"
 
+      - name: Build man page
+        working-directory: rust
+        run: make man
+
       - name: Build .deb
         working-directory: rust
         run: cargo deb
