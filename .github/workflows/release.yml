@@ -96,7 +96,13 @@ jobs:
           - id: ubuntu2604
             image: ubuntu:26.04
     runs-on: ubuntu-latest
-    container: ${{ matrix.image }}
+    container:
+      image: ${{ matrix.image }}
+      # Actually mounting FUSE inside the container (not just installing
+      # the package) needs both of these - without them /dev/fuse isn't
+      # visible in the container and mount fails with "fuse: device not
+      # found, try 'modprobe fuse' first" even though the host has it.
+      options: --cap-add SYS_ADMIN --device /dev/fuse
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -114,8 +120,7 @@ jobs:
       # container, mount it, write and read a file back, unmount, and run
       # the integrity check - proves FUSE mounting and SQLCipher both
       # actually work in this distro's environment, not just that the
-      # binary is present. Needs --cap-add SYS_ADMIN --device /dev/fuse on
-      # the runner (GitHub-hosted ubuntu-latest runners support this).
+      # binary is present.
       - name: Smoke-test the installed package
         run: |
           mkdir -p /root/mnt
