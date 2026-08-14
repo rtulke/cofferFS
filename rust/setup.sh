@@ -10,16 +10,23 @@ if ! command -v apt-get >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> Installing system packages (build tools, fuse3, sqlcipher headers)"
+echo "==> Installing system packages (build tools, fuse3)"
 sudo apt-get update -qq
 sudo apt-get install -y \
     build-essential \
     pkg-config \
+    perl \
     fuse3 \
     libfuse3-dev \
-    libsqlcipher-dev \
     curl \
     ca-certificates
+
+# SQLCipher and OpenSSL are compiled from source and statically linked in
+# (see Cargo.toml: rusqlite's bundled-sqlcipher-vendored-openssl feature).
+# No libsqlcipher-dev/libssl-dev needed - this also sidesteps a confirmed
+# upstream SQLCipher bug present in distro-packaged builds (see
+# ../upstream-sqlcipher-bug/). perl+make (make comes with build-essential)
+# are needed to build OpenSSL from source.
 
 # The Rust toolchain shipped in apt on these distros (1.63-1.75 depending on
 # release) is too old for current crate dependencies (several now require the

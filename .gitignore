@@ -7,4 +7,6 @@ __pycache__/
 *.cryptc-wal
 *.cryptc-shm
 rust/target/
+rust/target-*/
+dist/
 *.deb

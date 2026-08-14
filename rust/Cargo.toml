@@ -2,6 +2,10 @@
 name = "cryptc"
 version = "0.1.0"
 edition = "2021"
+description = "Growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)"
+license = "MIT"
+authors = ["Robert Tulke <turo@naz.ch>"]
+repository = "https://github.com/rtulke/cryptc"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,4 +17,23 @@ fuser = { version = "0.18.0", features = ["libfuse3"] }
 libc = "0.2.189"
 nix = { version = "0.31.3", features = ["fs"] }
 rpassword = "7.5.4"
-rusqlite = { version = "0.40.2", features = ["backup", "sqlcipher"] }
+rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
+
+[package.metadata.deb]
+maintainer = "Robert Tulke <turo@naz.ch>"
+copyright = "2026, Robert Tulke <turo@naz.ch>"
+section = "utils"
+priority = "optional"
+depends = "$auto, fuse3"
+extended-description = """\
+cryptc creates a single-file encrypted container that any user can create \
+and mount without root or sudo. It's backed by SQLCipher (bundled, \
+statically linked - no system libsqlcipher dependency) and mounted via \
+FUSE. Containers grow automatically as data is written (no fixed size, no \
+resize step), and are crash-safe via SQLite's WAL journal.
+"""
+assets = [
+    ["target/release/cryptc", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/cryptc/README.md", "644"],
+    ["../README.md", "usr/share/doc/cryptc/PROJECT_README.md", "644"],
+]
