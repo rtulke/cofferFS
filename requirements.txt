@@ -1,2 +1,0 @@
-fusepy>=3.0.1
-sqlcipher3-binary>=0.5.0

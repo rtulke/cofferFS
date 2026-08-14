@@ -15,16 +15,16 @@ cryptc umount ~/vault
 
 | | Use this for | Docs |
 |---|---|---|
-| **Rust** (`rust/`) | Production / any real amount of data. Compiled, faster, packaged as a `.deb` for Debian 12/13 and Ubuntu 24.04/26.04. | [rust/README.md](rust/README.md) |
-| **Python** (this file, `cryptc` at repo root) | The original reference implementation - quicker to read/hack on, no compiler needed. | you're reading it |
+| **Rust** (`rust/`) | Production / any real amount of data. Compiled, faster, packaged as a `.deb` for Debian 12/13 and Ubuntu 24.04/26.04. This is the only implementation published in this repository. | [rust/README.md](rust/README.md) |
+| **Python** | The original reference implementation - quicker to read/hack on, no compiler needed. Kept locally by the maintainer only; **not tracked in this Git repository**, so it isn't available if you cloned this from GitHub. | n/a |
 
 Both read/write the identical container format and share the same CLI
 (`create`/`mount`/`umount`/`check`/`backup`/`passwd`/`info`) and the same
 crash-safety/encryption design described below - the sections on *how it
 works*, *why it doesn't destroy your data*, and *known limitations* apply to
-both. Everything past **Requirements / build environment** below is
-Python-specific; see [rust/README.md](rust/README.md) for the Rust build,
-benchmarks, and packaging instructions.
+both, even though only the Rust build is distributed here. See
+[rust/README.md](rust/README.md) for the Rust build, benchmarks, install,
+and packaging instructions.
 
 ## How it works
 
@@ -109,22 +109,16 @@ holding a flat rate rather than degrading as the container grew. See the
 [Rust port's README](rust/README.md) for the same benchmark against the
 compiled version, which is faster still.
 
-## Requirements / build environment (Python)
+## Requirements / build environment
 
-For the Rust build, see [rust/README.md](rust/README.md) instead - it also
-covers the prebuilt `.deb`.
+See [rust/README.md](rust/README.md) for install (prebuilt `.deb` or build
+from source), the man page, and packaging instructions - that's the
+implementation this repository actually ships.
 
-- Linux with FUSE 3 (`fuse3` package) — this was built and tested on
-  Ubuntu 24.04. macOS works via [macFUSE](https://osxfuse.github.io/)
-  (`brew install --cask macfuse`, one-time security approval required).
-- Python 3.9+
-
-```bash
-./setup.sh                 # installs fuse3 (via apt/dnf/brew) + creates .venv
-source .venv/bin/activate
-```
-
-`setup.sh` is safe to re-run; it just installs what's missing.
+The Python reference implementation mentioned above requires Linux with
+FUSE 3 and Python 3.9+ (macOS works via [macFUSE](https://osxfuse.github.io/)),
+but since it isn't part of this repository there's nothing to install from
+here for it.
 
 ## Usage
 
@@ -171,11 +165,8 @@ cryptc passwd vault.cryptc      # change the password
 
 ## Files in this repo
 
-- `cryptc` — the Python CLI + FUSE filesystem implementation (single file)
-- `requirements.txt` — `fusepy`, `sqlcipher3-binary`
-- `setup.sh` — bootstraps the system packages + Python virtualenv
-- `rust/` — the compiled Rust port: source, `Makefile`, `setup.sh`, and
-  `.deb` packaging (see [rust/README.md](rust/README.md))
-- `upstream-sqlcipher-bug/` — reproduction and write-up for an upstream
-  SQLCipher bug found while building this (`cipher_integrity_check` false
-  positives on databases past 4GB)
+- `rust/` — the compiled Rust port: source, `Makefile`, man page,
+  `.deb` packaging (see [rust/README.md](rust/README.md)) - the only
+  implementation tracked and published here
+- `.github/workflows/release.yml` — builds a `.deb` per target distro and
+  publishes it to GitHub Releases
