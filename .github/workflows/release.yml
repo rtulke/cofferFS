@@ -43,7 +43,7 @@ jobs:
 
       # rustup's toolchain, not the distro's apt rustc/cargo (1.63-1.75
       # depending on release - too old for several dependencies, which need
-      # the 2024 edition). See rust/README.md.
+      # the 2024 edition). See README.md.
       - name: Install Rust
         run: |
           curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
@@ -63,20 +63,17 @@ jobs:
         run: cargo install cargo-deb --locked --version "$CARGO_DEB_VERSION"
 
       - name: Build man page
-        working-directory: rust
         run: make man
 
       - name: Build .deb
-        working-directory: rust
         run: cargo deb
 
       - name: Rename package with distro id
-        working-directory: rust
         run: |
           SRC=$(ls target/debian/*.deb | head -1)
           DST="target/debian/$(basename "$SRC" | sed "s/_amd64/_${{ matrix.id }}_amd64/")"
           mv "$SRC" "$DST"
-          echo "DEB_PATH=rust/$DST" >> "$GITHUB_ENV"
+          echo "DEB_PATH=$DST" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v7
         with:

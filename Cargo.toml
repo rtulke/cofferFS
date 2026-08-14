@@ -36,5 +36,4 @@ assets = [
     ["target/release/cryptc", "usr/bin/", "755"],
     ["target/man/cryptc.1.gz", "usr/share/man/man1/cryptc.1.gz", "644"],
     ["README.md", "usr/share/doc/cryptc/README.md", "644"],
-    ["../README.md", "usr/share/doc/cryptc/PROJECT_README.md", "644"],
 ]

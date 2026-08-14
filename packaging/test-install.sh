@@ -5,7 +5,7 @@
 # then runs a full create/mount/write/read/umount/check cycle - not just
 # "did it install", but does the mounted filesystem actually work.
 set -euo pipefail
-cd "$(dirname "$0")/../.."   # repo root
+cd "$(dirname "$0")/.."   # repo root
 
 RUNTIME=docker
 command -v docker >/dev/null 2>&1 || RUNTIME=podman
