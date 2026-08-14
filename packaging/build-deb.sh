@@ -14,7 +14,7 @@
 # Cargo.toml), so libfuse3 is the only runtime library dependency that
 # varies across targets.
 set -euo pipefail
-cd "$(dirname "$0")/../.."   # repo root
+cd "$(dirname "$0")/.."   # repo root
 
 RUNTIME=docker
 command -v docker >/dev/null 2>&1 || RUNTIME=podman
@@ -36,9 +36,9 @@ for id in "${TARGET_IDS[@]}"; do
     echo "== Building for $id ($img)"
     echo "=========================================================="
     "$RUNTIME" run --rm \
-        -e CARGO_TARGET_DIR="/work/rust/target-$id" \
+        -e CARGO_TARGET_DIR="/work/target-$id" \
         -v "$PWD:/work:Z" \
-        -w /work/rust \
+        -w /work \
         "$img" \
         bash -euxc '
             apt-get update -qq
@@ -51,7 +51,7 @@ for id in "${TARGET_IDS[@]}"; do
             make man
             cargo deb
         '
-    SRC_DEB=$(ls "rust/target-$id/debian/"*.deb | head -1)
+    SRC_DEB=$(ls "target-$id/debian/"*.deb | head -1)
     DST_DEB="dist/$(basename "$SRC_DEB" | sed "s/_amd64/_${id}_amd64/")"
     cp "$SRC_DEB" "$DST_DEB"
     echo "-> $DST_DEB"

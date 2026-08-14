@@ -160,11 +160,11 @@ fn cmd_check(file: &Path) -> Result<()> {
     // SQLCipher's own "PRAGMA cipher_integrity_check" has a confirmed upstream bug:
     // it misreports every page from 4GB onward (page (4*1024^3)/page_size + 1) as
     // HMAC-failed, even though those pages decrypt and verify correctly through the
-    // normal read path. Reproduced independently across three SQLCipher builds
-    // (Ubuntu's libsqlcipher-dev, Python's sqlcipher3-binary wheel, and a from-source
-    // build), so it isn't specific to this project. "PRAGMA integrity_check" below is
-    // authoritative: it actually walks and decrypts every page to verify the B-tree
-    // structure, so if it passes, the data is genuinely intact.
+    // normal read path. Reproduced independently across two SQLCipher builds
+    // (Ubuntu's libsqlcipher-dev and a from-source build), so it isn't specific to
+    // this project. "PRAGMA integrity_check" below is authoritative: it actually
+    // walks and decrypts every page to verify the B-tree structure, so if it
+    // passes, the data is genuinely intact.
     let page_size: u64 = con
         .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
         .map(|v| v as u64)
