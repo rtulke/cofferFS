@@ -134,7 +134,11 @@ jobs:
 
   release:
     needs: verify
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Tag pushes (vX.Y.Z) publish a proper, stable release. Pushes to main
+    # additionally republish a single rolling "latest" prerelease so a
+    # built .deb is always available between tagged versions - see the
+    # "Determine release identity" step for how the two are told apart.
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -144,16 +148,43 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Determine release identity
+        id: rel
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "title=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "notes=cryptc $GITHUB_REF_NAME - one .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "title=cryptc (main, rolling build)" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "notes=Rolling build of main@${GITHUB_SHA::7} - not a stable release, see the tagged vX.Y.Z releases for that. One .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create or update the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd artifacts
           sha256sum *.deb > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" \
+          TAG="${{ steps.rel.outputs.tag }}"
+          PRERELEASE_FLAG=""
+          [[ "${{ steps.rel.outputs.prerelease }}" == "true" ]] && PRERELEASE_FLAG="--prerelease"
+          # "latest" is a moving target: delete the previous release+tag first
+          # so the tag actually advances to this commit instead of staying
+          # pinned to whichever commit first created it. Tagged vX.Y.Z
+          # releases are never deleted here - only re-uploaded via the
+          # `gh release upload --clobber` fallback below on a re-run.
+          if [[ "$TAG" == "latest" ]]; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          fi
+          gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --notes "cryptc $GITHUB_REF_NAME - one .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" \
+            --title "${{ steps.rel.outputs.title }}" \
+            --notes "${{ steps.rel.outputs.notes }}" \
+            $PRERELEASE_FLAG \
             * \
-          || gh release upload "$GITHUB_REF_NAME" * \
+          || gh release upload "$TAG" * \
             --repo "$GITHUB_REPOSITORY" --clobber
