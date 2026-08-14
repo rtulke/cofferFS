@@ -99,10 +99,13 @@ jobs:
     container:
       image: ${{ matrix.image }}
       # Actually mounting FUSE inside the container (not just installing
-      # the package) needs both of these - without them /dev/fuse isn't
-      # visible in the container and mount fails with "fuse: device not
-      # found, try 'modprobe fuse' first" even though the host has it.
-      options: --cap-add SYS_ADMIN --device /dev/fuse
+      # the package) needs all three - without --device, /dev/fuse isn't
+      # visible at all ("device not found, try 'modprobe fuse' first");
+      # with only --cap-add SYS_ADMIN added on top, the mount() syscall
+      # itself is still blocked by Docker's default seccomp profile
+      # ("Permission denied") - confirmed by hitting both failures in
+      # turn on this exact job.
+      options: --cap-add SYS_ADMIN --device /dev/fuse --security-opt seccomp=unconfined
     steps:
       - uses: actions/download-artifact@v8
         with:
