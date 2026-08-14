@@ -1,0 +1,160 @@
+# cryptc (Rust)
+
+A from-scratch Rust port of the [Python cryptc prototype](../cryptc) — same
+on-disk format and behavior, compiled, memory-safe, and noticeably faster.
+The Python version stays in the parent directory as the reference
+implementation; both read/write the same kind of container file.
+
+```
+cryptc create vault.cryptc
+cryptc mount  vault.cryptc ~/vault
+cp -r ~/Documents/secret-stuff ~/vault/
+cryptc umount ~/vault
+```
+
+## Build
+
+```bash
+./setup.sh          # Ubuntu 24.04 / 26.06, Debian 12 / 13 - see below
+make build           # after setup.sh once, this is all you need
+sudo make install    # optional: installs to /usr/local/bin/cryptc
+```
+
+`setup.sh` is idempotent (safe to re-run) and does three things:
+
+1. Installs system packages via `apt`: `build-essential`, `pkg-config`,
+   `fuse3`, `libfuse3-dev`, `libsqlcipher-dev`.
+2. Installs a current Rust stable toolchain via [rustup](https://rustup.rs)
+   under `$HOME/.cargo`. **This is required** — the `rustc`/`cargo` shipped
+   in apt on these distros (1.63-1.75 depending on release) is too old for
+   several of this project's dependencies, which need the 2024 edition.
+   rustup's toolchain doesn't conflict with any distro package.
+3. Runs `cargo build --release`.
+
+If you're not on Ubuntu/Debian: install `libfuse3-dev`/`fuse3` and
+`libsqlcipher-dev` (or their equivalents) plus a Rust toolchain via
+[rustup.rs](https://rustup.rs), then `cargo build --release`.
+
+## Why a rewrite, and why Rust over C
+
+The Python prototype proved the design (SQLCipher-encrypted SQLite as a
+growable, user-mountable FUSE container) and its crash-safety claims. A
+compiled rewrite removes the Python/FUSE-binding overhead. Rust was chosen
+over C specifically because:
+
+- `fuser` (FUSE bindings) and `rusqlite` (with the `sqlcipher` feature) map
+  closely to the Python code's structure (`fusepy`'s `Operations` class →
+  the `Filesystem` trait; `sqlcipher3`'s `con.execute(...)` → `rusqlite`
+  calls), so the port was close to mechanical rather than a redesign.
+- The compiler's memory safety removes an entire class of bugs (leaks,
+  use-after-free, buffer overflows in the block-storage code) that hand-
+  rolled C memory management would risk introducing — for a tool whose
+  whole point is *not* corrupting your data, that risk isn't worth taking.
+- Both `libfuse3-dev` and `libsqlcipher-dev` are readily available via apt
+  either way, so C had no build-environment advantage here.
+
+## Differences from the Python version
+
+- Inode numbers are `AUTOINCREMENT` (never reused), avoiding a FUSE
+  inode-reuse hazard the Python prototype didn't need to worry about at its
+  scale.
+- Every mutating FUSE call (write, mkdir, rename, ...) is wrapped in one
+  explicit SQLite transaction and committed once, so a single filesystem
+  operation is always all-or-nothing — matching, and making more explicit,
+  the crash-safety property demonstrated in the Python version.
+- `mount` daemonizes by default (returns control to the shell immediately,
+  like the Python version's `fusepy` default); pass `--foreground` to keep
+  it attached for debugging.
+- Password prompts mask input on a real terminal; if stdin isn't a TTY
+  (piping, scripting), it falls back to a visible plain-text read, same
+  spirit as Python's `getpass` fallback.
+
+Everything else — the schema, the block size, the CLI subcommands
+(`create`/`mount`/`umount`/`check`/`backup`/`passwd`/`info`), the growable-
+by-default design, and the WAL/SQLCipher crash-safety story — is identical
+to what's documented in the [parent README](../README.md).
+
+## Verified while building this
+
+Same test pass as the Python version, against the compiled binary: created
+a container, mounted it as a non-root user, wrote 1000 small files plus a
+20MB file (checksum-verified), unmounted and remounted to confirm
+persistence, rejected a wrong password, ran `check`/`backup`/`passwd`
+successfully, and hard-`kill -9`'d the mount process mid-write — the
+container stayed structurally intact (`check` clean) with every
+previously-written byte recoverable afterward.
+
+## Performance at scale (95,000 files, ~12GB)
+
+Both implementations were benchmarked end to end at a realistic scale
+(95,000 files, mixed sizes averaging ~126KB, ~12GB total) against a plain
+ext4 baseline for context:
+
+| | population (write) | `find -type f \| wc -l` |
+|---|---|---|
+| ext4 (baseline) | 23.6s (4027 files/s, 509MB/s) | 0.05s |
+| Python (fixed) | 402.8s (236 files/s, 30MB/s) | ~5s (extrapolated) |
+| Rust (before tuning) | 463.5s (205 files/s, 26MB/s) | 0.94s |
+| **Rust (tuned)** | **365.3s (260 files/s, 33MB/s)** | 0.94s |
+
+Reading/listing was never the bottleneck at any scale tested. Two real
+issues turned up while chasing write throughput at this scale, both fixed:
+
+1. **Python: FUSE was chunking every write into ~4KB pieces.** Without
+   `big_writes`/`max_write` mount options, the kernel capped each `write()`
+   request at 4KB, so a ~126KB file arrived as ~31 separate FUSE calls -
+   and since each write committed its own transaction, that meant ~31
+   commits instead of 1. Profiling with `cProfile` on the live FUSE process
+   (in-process, since `ptrace`-based tools like `strace`/`py-spy` aren't
+   always available) showed 67% of total time inside `Connection.commit()`
+   alone. Fixed in the Python version by passing `big_writes=True` and
+   `max_write`/`max_read` matching the storage block size - a ~16x
+   throughput improvement (23 files/s -> 369 files/s in isolated testing).
+   `fuser` (this Rust port's FUSE binding) already negotiates a large
+   `max_write` by default, so Rust never had this problem.
+2. **Rust: every FUSE call re-parsed its SQL.** `fs.rs` now uses
+   `Connection::prepare_cached` throughout instead of `execute`/`prepare`,
+   and `PRAGMA cache_size` is raised from SQLite's ~2MB default to 128MB
+   (SQLCipher has to re-decrypt+HMAC-verify a page every time it's evicted
+   from cache and re-read, so a bigger cache means less redundant crypto
+   work as the container grows). Together these cut the full 95,000-file/
+   12GB run from 463s to 365s (~27% faster).
+
+**Methodology note:** benchmark runs must be isolated. An early comparison
+that ran the Python and Rust population scripts concurrently on the same
+4-core box showed Python collapsing to ~10 files/s - that was resource
+contention with the concurrently-running Rust benchmark, not a real
+Python-specific cliff. Once run alone, Python held a flat ~23 files/s
+(pre-fix) / ~236-369 files/s (post-fix) for the whole run. Always benchmark
+one mount at a time.
+
+## Known upstream SQLCipher bug (not ours, but worth knowing about)
+
+While verifying integrity on the 12GB benchmark container, `cryptc check`
+reported hundreds of thousands of "corrupt" pages, all starting at exactly
+page 1,048,577 - which, at 4096 bytes/page, is precisely the 4GB mark
+(2^32 bytes). That's too precise to be real corruption, so it was run down:
+
+- Reproduced with a **30-line program using nothing but `rusqlite` +
+  SQLCipher** - no FUSE, no cryptc schema, just a table with a BLOB column,
+  written to past 4GB and integrity-checked. Same failure, same exact page.
+- Reproduced identically across **three independent SQLCipher builds**:
+  Ubuntu's `libsqlcipher-dev` package, Python's `sqlcipher3-binary` PyPI
+  wheel (a separately-compiled, bundled build), and a from-source build via
+  `bundled-sqlcipher-vendored-openssl`. All three fail at the exact same
+  page number.
+- Meanwhile `PRAGMA integrity_check` - which actually walks and decrypts
+  every page to verify the B-tree structure, rather than just recomputing
+  HMACs - reported `ok` every time. Files written well past the 4GB mark
+  (including the very last file in a 12GB container) read back with
+  correct, repeatable checksums.
+
+Conclusion: `PRAGMA cipher_integrity_check` has a real bug in its own page-
+iteration logic for databases past 4GB, independent of this project. The
+data itself is fine. `cryptc check` (both the Python and Rust versions) now
+detects this specific pattern - a page number past the 4GB boundary flagged
+by `cipher_integrity_check` while `integrity_check` passes cleanly - and
+reports the container as healthy with an explanatory note, while still
+failing loudly on genuine corruption anywhere in the file (verified with a
+deliberate single-byte flip in a small container: still caught, still exits
+non-zero).
