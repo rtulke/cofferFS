@@ -11,14 +11,30 @@ cp -r ~/Documents/secret-stuff ~/vault/
 cryptc umount ~/vault
 ```
 
+## Two implementations, same format
+
+| | Use this for | Docs |
+|---|---|---|
+| **Rust** (`rust/`) | Production / any real amount of data. Compiled, faster, packaged as a `.deb` for Debian 12/13 and Ubuntu 24.04/26.04. | [rust/README.md](rust/README.md) |
+| **Python** (this file, `cryptc` at repo root) | The original reference implementation - quicker to read/hack on, no compiler needed. | you're reading it |
+
+Both read/write the identical container format and share the same CLI
+(`create`/`mount`/`umount`/`check`/`backup`/`passwd`/`info`) and the same
+crash-safety/encryption design described below - the sections on *how it
+works*, *why it doesn't destroy your data*, and *known limitations* apply to
+both. Everything past **Requirements / build environment** below is
+Python-specific; see [rust/README.md](rust/README.md) for the Rust build,
+benchmarks, and packaging instructions.
+
 ## How it works
 
 `vault.cryptc` is a single [SQLCipher](https://www.zetetic.net/sqlcipher/)
 (encrypted SQLite) database. Directories and files are rows in that
-database; file content is stored in 128 KiB chunks. Mounting is done with
-[FUSE](https://github.com/libfuse/libfuse) via the `fusepy` bindings, which
-is why no root privileges are required — FUSE mounts are owned by, and only
-accessible to, the user who created them.
+database; file content is stored in 128 KiB chunks. Mounting is done via
+[FUSE](https://github.com/libfuse/libfuse) - the Python implementation uses
+the `fusepy` bindings, the Rust port uses the `fuser` crate - which is why
+no root privileges are required either way: FUSE mounts are owned by, and
+only accessible to, the user who created them.
 
 ### Why this design, and what "auto-grow" means here
 
@@ -93,7 +109,10 @@ holding a flat rate rather than degrading as the container grew. See the
 [Rust port's README](rust/README.md) for the same benchmark against the
 compiled version, which is faster still.
 
-## Requirements / build environment
+## Requirements / build environment (Python)
+
+For the Rust build, see [rust/README.md](rust/README.md) instead - it also
+covers the prebuilt `.deb`.
 
 - Linux with FUSE 3 (`fuse3` package) — this was built and tested on
   Ubuntu 24.04. macOS works via [macFUSE](https://osxfuse.github.io/)
@@ -152,6 +171,11 @@ cryptc passwd vault.cryptc      # change the password
 
 ## Files in this repo
 
-- `cryptc` — the CLI + FUSE filesystem implementation (single Python file)
+- `cryptc` — the Python CLI + FUSE filesystem implementation (single file)
 - `requirements.txt` — `fusepy`, `sqlcipher3-binary`
 - `setup.sh` — bootstraps the system packages + Python virtualenv
+- `rust/` — the compiled Rust port: source, `Makefile`, `setup.sh`, and
+  `.deb` packaging (see [rust/README.md](rust/README.md))
+- `upstream-sqlcipher-bug/` — reproduction and write-up for an upstream
+  SQLCipher bug found while building this (`cipher_integrity_check` false
+  positives on databases past 4GB)

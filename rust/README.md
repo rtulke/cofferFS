@@ -1,9 +1,13 @@
 # cryptc (Rust)
 
-A from-scratch Rust port of the [Python cryptc prototype](../cryptc) — same
-on-disk format and behavior, compiled, memory-safe, and noticeably faster.
-The Python version stays in the parent directory as the reference
-implementation; both read/write the same kind of container file.
+A growable, encrypted, single-file container you create and mount **as a
+normal user — no root, no sudo**. Backed by SQLCipher (statically bundled,
+no runtime dependency on a system SQLCipher package) and mounted via FUSE.
+This is the compiled, packaged version of cryptc; a
+[Python reference implementation](../cryptc) with identical behavior and
+on-disk format lives in the parent directory (both read/write the same
+container file, and either can be used to `check`/`backup`/`mount` a
+container the other created).
 
 ```
 cryptc create vault.cryptc
@@ -12,10 +16,24 @@ cp -r ~/Documents/secret-stuff ~/vault/
 cryptc umount ~/vault
 ```
 
-## Build
+## Install
+
+**Prebuilt `.deb`** — one package per target distro (Debian 12/13, Ubuntu
+24.04/26.04), each built natively in that distro (see **Packaging** for
+why there's one per distro rather than a single universal package):
 
 ```bash
-./setup.sh          # Ubuntu 24.04 / 26.06, Debian 12 / 13 - see below
+sudo apt-get install ./cryptc_*_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb
+```
+
+Grab the matching `.deb` for your distro from the
+[Releases page](../../releases), or build them all yourself (see
+**Packaging** below).
+
+**From source:**
+
+```bash
+./setup.sh          # Debian 12/13, Ubuntu 24.04/26.04 - see below
 make build           # after setup.sh once, this is all you need
 sudo make install    # optional: installs to /usr/local/bin/cryptc
 ```
@@ -23,7 +41,7 @@ sudo make install    # optional: installs to /usr/local/bin/cryptc
 `setup.sh` is idempotent (safe to re-run) and does three things:
 
 1. Installs system packages via `apt`: `build-essential`, `pkg-config`,
-   `fuse3`, `libfuse3-dev`, `libsqlcipher-dev`.
+   `perl`, `fuse3`, `libfuse3-dev`.
 2. Installs a current Rust stable toolchain via [rustup](https://rustup.rs)
    under `$HOME/.cargo`. **This is required** — the `rustc`/`cargo` shipped
    in apt on these distros (1.63-1.75 depending on release) is too old for
@@ -31,9 +49,12 @@ sudo make install    # optional: installs to /usr/local/bin/cryptc
    rustup's toolchain doesn't conflict with any distro package.
 3. Runs `cargo build --release`.
 
-If you're not on Ubuntu/Debian: install `libfuse3-dev`/`fuse3` and
-`libsqlcipher-dev` (or their equivalents) plus a Rust toolchain via
-[rustup.rs](https://rustup.rs), then `cargo build --release`.
+SQLCipher and OpenSSL are compiled from source and statically linked in
+(no `libsqlcipher-dev` needed) - see **Packaging** below for why.
+
+If you're not on Ubuntu/Debian: install `libfuse3-dev`/`fuse3` (or the
+equivalent) plus a Rust toolchain via [rustup.rs](https://rustup.rs), then
+`cargo build --release`.
 
 ## Why a rewrite, and why Rust over C
 
@@ -158,3 +179,52 @@ reports the container as healthy with an explanatory note, while still
 failing loudly on genuine corruption anywhere in the file (verified with a
 deliberate single-byte flip in a small container: still caught, still exits
 non-zero).
+
+## Packaging
+
+`packaging/build-deb.sh` builds **one `.deb` per target distro**, each
+natively inside that distro's own container, via
+[cargo-deb](https://github.com/kornelski/cargo-deb). Output goes to
+`dist/cryptc_<version>_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb`.
+
+```bash
+packaging/build-deb.sh          # -> dist/cryptc_*_<id>_amd64.deb (all 4)
+packaging/test-install.sh       # installs each into a matching fresh
+                                 # container and runs a full create/mount/
+                                 # write/read/umount/check cycle
+```
+
+**Why per-distro and not one universal package:** the first attempt built a
+single `.deb` inside `debian:12-slim` (the oldest target) on the theory that
+glibc and libfuse3 are both forward-compatible - a binary built against an
+older version runs fine on a newer system, so building against the oldest
+target's libraries should make one package installable everywhere. That's
+true for glibc (`libc6 (>= 2.34)` from the Debian 12 build is satisfied by
+all four targets), but **not** for libfuse3: Debian 12 and Ubuntu 24.04 ship
+it as SONAME 3 (package `libfuse3-3`), while Debian 13 and Ubuntu 26.04
+bumped it to SONAME 4 (package `libfuse3-4`) - and critically, `libfuse3-4`
+does *not* also ship a `libfuse3.so.3` symlink for backward compatibility.
+A binary linked against SONAME 3 can't load SONAME 4 or vice versa. This
+wasn't a theoretical concern - `test-install.sh` caught it immediately: the
+Debian-12-built package's `Depends: libfuse3-3` wasn't even resolvable on a
+fresh Debian 13 container, so `apt-get install` refused outright. Building
+natively per distro (matching the pattern already used for this project's
+other packaging pipelines) sidesteps the whole question - each package
+just depends on whatever that distro actually ships.
+
+SQLCipher and OpenSSL are statically bundled into every build regardless
+(rusqlite's `bundled-sqlcipher-vendored-openssl` feature) rather than linked
+against the distro's `libsqlcipher-dev`, for two reasons: it removes a
+runtime dependency that would otherwise need separate version tracking
+across four distros, and it sidesteps the upstream 4GB bug above living in
+whichever SQLCipher build happens to be in a given distro's archive at the
+time. So libfuse3 ends up being the *only* runtime library dependency that
+varies by target.
+
+The only runtime dependencies are `libc6`, `libfuse3-3`/`libfuse3-4`
+(whichever the target ships), and the `fuse3` package itself (for the
+`fusermount3` helper binary that `mount`/`umount` actually shell out to -
+it's a separate package from `libfuse3-N`, easy to miss since `ldd` only
+reports the linked *library*, not the subprocess dependency; this was also
+caught by `test-install.sh` actually exercising `mount`/`umount`, not just
+checking that install succeeds).

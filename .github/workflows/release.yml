@@ -1,0 +1,155 @@
+name: Release
+
+# build+verify run on every push/PR to main so packaging breakage is caught
+# early; the release job only fires on an actual "vX.Y.Z" tag push.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_DEB_VERSION: "3.7.0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: debian12
+            image: debian:12-slim
+          - id: debian13
+            image: debian:13-slim
+          - id: ubuntu2404
+            image: ubuntu:24.04
+          - id: ubuntu2604
+            image: ubuntu:26.04
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      # actions/checkout shells out to git, which isn't present in the bare
+      # distro images used as build containers - install it (and everything
+      # the Rust build itself needs) before checking out.
+      - name: Install build prerequisites
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git build-essential pkg-config perl libfuse3-dev curl ca-certificates
+
+      - uses: actions/checkout@v7
+
+      # rustup's toolchain, not the distro's apt rustc/cargo (1.63-1.75
+      # depending on release - too old for several dependencies, which need
+      # the 2024 edition). See rust/README.md.
+      - name: Install Rust
+        run: |
+          curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # One .deb per distro, built natively in that distro's own container -
+      # not one "universal" package. Debian 12/Ubuntu 24.04 ship libfuse3 as
+      # SONAME 3 (libfuse3-3); Debian 13/Ubuntu 26.04 bumped it to SONAME 4
+      # (libfuse3-4, with no libfuse3.so.3 symlink), so a binary linked
+      # against one can't dynamically load the other. Confirmed by testing:
+      # a Debian-12-built binary's Depends: isn't even resolvable on
+      # Debian 13. SQLCipher/OpenSSL are statically bundled in every build
+      # either way (see Cargo.toml), so libfuse3 is the only runtime library
+      # dependency that actually varies by target.
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked --version "$CARGO_DEB_VERSION"
+
+      - name: Build .deb
+        working-directory: rust
+        run: cargo deb
+
+      - name: Rename package with distro id
+        working-directory: rust
+        run: |
+          SRC=$(ls target/debian/*.deb | head -1)
+          DST="target/debian/$(basename "$SRC" | sed "s/_amd64/_${{ matrix.id }}_amd64/")"
+          mv "$SRC" "$DST"
+          echo "DEB_PATH=rust/$DST" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ matrix.id }}
+          path: ${{ env.DEB_PATH }}
+          if-no-files-found: error
+
+  verify:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: debian12
+            image: debian:12-slim
+          - id: debian13
+            image: debian:13-slim
+          - id: ubuntu2404
+            image: ubuntu:24.04
+          - id: ubuntu2604
+            image: ubuntu:26.04
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: deb-${{ matrix.id }}
+
+      # A real `apt-get install`, not `dpkg -i`, so declared Depends:
+      # actually have to resolve against this distro's package archive -
+      # that's the whole point of testing per-distro in the first place.
+      - name: Install the package the same way an end user would
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./cryptc_*.deb
+
+      # Full functional smoke test, not just "did dpkg accept it": create a
+      # container, mount it, write and read a file back, unmount, and run
+      # the integrity check - proves FUSE mounting and SQLCipher both
+      # actually work in this distro's environment, not just that the
+      # binary is present. Needs --cap-add SYS_ADMIN --device /dev/fuse on
+      # the runner (GitHub-hosted ubuntu-latest runners support this).
+      - name: Smoke-test the installed package
+        run: |
+          mkdir -p /root/mnt
+          printf "testpass\ntestpass\n" | cryptc create /root/vault.cryptc
+          printf "testpass\n" | cryptc mount /root/vault.cryptc /root/mnt --foreground &
+          MOUNT_PID=$!
+          sleep 1
+          echo "hello from CI" > /root/mnt/f.txt
+          grep -q "hello from CI" /root/mnt/f.txt
+          fusermount3 -u /root/mnt
+          wait "$MOUNT_PID" 2>/dev/null || true
+          printf "testpass\n" | cryptc check /root/vault.cryptc
+
+  release:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          sha256sum *.deb > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "cryptc $GITHUB_REF_NAME - one .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" \
+            * \
+          || gh release upload "$GITHUB_REF_NAME" * \
+            --repo "$GITHUB_REPOSITORY" --clobber
