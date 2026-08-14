@@ -1,0 +1,9 @@
+.venv/
+.claude/
+__pycache__/
+*.pyc
+*.cryptc
+*.cryptc-wal
+*.cryptc-shm
+rust/target/
+*.deb
