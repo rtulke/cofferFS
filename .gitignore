@@ -11,3 +11,9 @@ rust/target-*/
 dist/
 *.deb
 build.log
+
+# Python reference implementation: kept locally, not published to GitHub -
+# only the Rust port (rust/) is tracked and released.
+/cryptc
+/requirements.txt
+/setup.sh
