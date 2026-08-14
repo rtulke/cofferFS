@@ -228,3 +228,11 @@ it's a separate package from `libfuse3-N`, easy to miss since `ldd` only
 reports the linked *library*, not the subprocess dependency; this was also
 caught by `test-install.sh` actually exercising `mount`/`umount`, not just
 checking that install succeeds).
+
+All four packages pass the full `test-install.sh` cycle (install, create,
+mount, write, read, unmount, check). On the two SONAME-3 targets (Debian 12,
+Ubuntu 24.04, both shipping libfuse3 3.14.0) `cryptc mount` prints
+`fuse: warning: library too old, some operations may not work` - cosmetic,
+every operation in the test cycle (including the ones the warning calls
+out) works correctly regardless; it doesn't appear on the newer SONAME-4
+targets (Debian 13's 3.17.2, Ubuntu 26.04's 3.18.2).

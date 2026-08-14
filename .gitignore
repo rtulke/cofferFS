@@ -10,3 +10,4 @@ rust/target/
 rust/target-*/
 dist/
 *.deb
+build.log
