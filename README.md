@@ -228,6 +228,17 @@ with an explanatory note, while still failing loudly on genuine corruption
 anywhere in the file (verified with a deliberate single-byte flip in a
 small container: still caught, still exits non-zero).
 
+Root cause and status: a 32-bit overflow in `sqlcipher_codec_ctx_integrity_
+check()`'s page-offset calculation (`src/crypto.c`), which wraps exactly at
+page 1,048,577 (4096-byte pages) - reported upstream as
+[sqlcipher/sqlcipher#604](https://github.com/sqlcipher/sqlcipher/issues/604).
+Confirmed by the maintainer as already fixed in SQLCipher 4.17.0. This
+project vendors SQLCipher through `rusqlite`'s
+`bundled-sqlcipher-vendored-openssl` feature (`libsqlite3-sys`), which as
+of writing still bundles 4.14.0 (predates the fix), so `cryptc check`'s
+workaround above remains necessary until that crate updates its vendored
+copy.
+
 ## Known limitations (honest scope)
 
 - **Single mounter at a time.** The FUSE loop is intentionally

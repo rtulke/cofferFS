@@ -157,12 +157,17 @@ fn cmd_check(file: &Path) -> Result<()> {
     let password = read_password(false)?;
     let con = db::open_db(file, &password, true)?;
 
-    // SQLCipher's own "PRAGMA cipher_integrity_check" has a confirmed upstream bug:
-    // it misreports every page from 4GB onward (page (4*1024^3)/page_size + 1) as
-    // HMAC-failed, even though those pages decrypt and verify correctly through the
-    // normal read path. Reproduced independently across two SQLCipher builds
-    // (Ubuntu's libsqlcipher-dev and a from-source build), so it isn't specific to
-    // this project. "PRAGMA integrity_check" below is authoritative: it actually
+    // SQLCipher's own "PRAGMA cipher_integrity_check" has a confirmed upstream bug
+    // (32-bit offset overflow in sqlcipher_codec_ctx_integrity_check, src/crypto.c -
+    // https://github.com/sqlcipher/sqlcipher/issues/604): it misreports every page
+    // from 4GB onward (page (4*1024^3)/page_size + 1) as HMAC-failed, even though
+    // those pages decrypt and verify correctly through the normal read path.
+    // Reproduced independently across two SQLCipher builds (Ubuntu's
+    // libsqlcipher-dev and a from-source build), so it isn't specific to this
+    // project. Fixed upstream in SQLCipher 4.17.0; still present as of writing in
+    // the 4.14.0 vendored by libsqlite3-sys (this project's
+    // bundled-sqlcipher-vendored-openssl dependency), so this workaround stays
+    // needed for now. "PRAGMA integrity_check" below is authoritative: it actually
     // walks and decrypts every page to verify the B-tree structure, so if it
     // passes, the data is genuinely intact.
     let page_size: u64 = con
