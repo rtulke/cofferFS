@@ -30,10 +30,10 @@ all yourself (see **Packaging** below).
 **From source:**
 
 ```bash
-./setup.sh          # Debian 12/13, Ubuntu 24.04/26.04 - see below
+./setup.sh           # Debian 12/13, Ubuntu 24.04/26.04 - see below
 make build           # after setup.sh once, this is all you need
 sudo make install    # optional: installs to /usr/local/bin/cryptc
-                      # + the cryptc(1) man page
+                     # + the cryptc(1) man page
 ```
 
 `setup.sh` is idempotent (safe to re-run) and does three things:
