@@ -138,11 +138,32 @@ fn cmd_umount(mountpoint: &Path) -> Result<()> {
                 .arg("-u")
                 .arg(mountpoint)
                 .status()?;
+            if !status.success() {
+                hint_sudo_umount(mountpoint);
+            }
             std::process::exit(status.code().unwrap_or(1));
         }
     }
     let status = std::process::Command::new("umount").arg(mountpoint).status()?;
+    if !status.success() {
+        hint_sudo_umount(mountpoint);
+    }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+// fusermount3/fusermount is setuid-root and briefly runs as effective root to
+// call umount2(); FUSE's default access check (fuser's SessionACL::Owner)
+// only allows the exact mounting uid, not even root, so it can reject that
+// even when the real caller is the mount's own owner - e.g. reliably
+// reproducible when the mountpoint lives on an NFS home directory with
+// root_squash. Plain `sudo umount` sidesteps this: real root calls umount2()
+// directly, without going through that FUSE-side check at all.
+fn hint_sudo_umount(mountpoint: &Path) {
+    eprintln!(
+        "If that failed with a permission error even though you're the one who \
+mounted it, try:\n    sudo umount {}",
+        mountpoint.display()
+    );
 }
 
 fn which(name: &str) -> Option<PathBuf> {
