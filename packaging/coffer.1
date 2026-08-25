@@ -1,34 +1,34 @@
-.TH CRYPTC 1 "2026-08-14" "cryptc 0.1.0" "User Commands"
+.TH COFFER 1 "2026-08-14" "coffer 0.1.0" "User Commands"
 .SH NAME
-cryptc \- growable, user-mountable encrypted single-file containers
+coffer \- growable, user-mountable encrypted single-file containers
 .SH SYNOPSIS
-.B cryptc create
+.B coffer create
 .I file
 .RB [ \-\-max\-size
 .IR SIZE ]
 .br
-.B cryptc mount
+.B coffer mount
 .I file mountpoint
 .RB [ \-\-foreground ]
 .RB [ \-\-idle\-timeout
 .IR DURATION ]
 .br
-.B cryptc umount
+.B coffer umount
 .I mountpoint
 .br
-.B cryptc check
+.B coffer check
 .I file
 .br
-.B cryptc backup
+.B coffer backup
 .I file dest
 .br
-.B cryptc passwd
+.B coffer passwd
 .I file
 .br
-.B cryptc info
+.B coffer info
 .I file
 .SH DESCRIPTION
-.B cryptc
+.B coffer
 creates a single-file encrypted container that any user can create and
 mount without root or sudo. Directories and files are rows in a
 .BR SQLCipher (3)
@@ -78,7 +78,7 @@ at
 as the current user.
 .I mountpoint
 is created if missing and must be empty. By default
-.B cryptc
+.B coffer
 daemonizes and returns control to the shell immediately; pass
 .B \-\-foreground
 to keep it attached (useful for debugging \- errors and FUSE
@@ -101,7 +101,11 @@ Shells out to
 .B fusermount
 or
 .BR umount (8)
-if unavailable).
+if unavailable). If the plain unmount fails (e.g. "device or resource
+busy" from a stale connection after a crashed mount daemon), automatically
+retries with a lazy unmount before giving up - no
+.BR sudo (8)
+needed for this.
 .TP
 .BI "check " file
 Verify container integrity without modifying it: SQLCipher's per-page
@@ -130,7 +134,7 @@ any), and directory/file/symlink counts.
 .SH EXIT STATUS
 .B 0
 on success.
-.B cryptc check
+.B coffer check
 exits
 .B 1
 if it finds a genuine HMAC failure or a failing structural integrity
@@ -138,11 +142,11 @@ check. Other commands exit non-zero on any error (wrong password,
 mountpoint not empty, I/O failure, etc.), with a message on stderr.
 .SH FILES
 .TP
-.I vault.cryptc
+.I vault.coffer
 The container itself: a single SQLCipher (encrypted SQLite) database
 file.
 .TP
-.IR vault.cryptc \-wal ", " vault.cryptc \-shm
+.IR vault.coffer \-wal ", " vault.coffer \-shm
 SQLite's Write-Ahead Log and shared-memory index, present alongside the
 container while it is open (mounted, or mid-command). Do not delete
 these while the container is in use; a clean unmount checkpoints and
@@ -161,7 +165,7 @@ SQLCipher has a confirmed upstream bug where
 misreports every page past the 4\ GB mark as HMAC-failed on containers
 larger than that, independent of this project (reproduced across three
 separate SQLCipher builds).
-.B cryptc check
+.B coffer check
 detects this specific false-positive pattern and treats the structural
 .B integrity_check
 (which actually decrypts and verifies every page) as authoritative, so
@@ -170,7 +174,7 @@ correctly failing on real corruption anywhere in the file.
 .SH SEE ALSO
 Full documentation, source, and the container's on-disk format:
 .br
-.UR https://github.com/rtulke/cryptc
+.UR https://github.com/rtulke/cofferFS
 .UE
 .SH AUTHOR
 Robert Tulke <turo@naz.ch>

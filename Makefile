@@ -15,7 +15,7 @@ debug:
 # lintian's manpage-not-compressed-with-max-compression expectations).
 man:
 	mkdir -p target/man
-	gzip -9 -n -c packaging/cryptc.1 > target/man/cryptc.1.gz
+	gzip -9 -n -c packaging/coffer.1 > target/man/coffer.1.gz
 
 # Building as root (typically via `sudo make install` run directly, without
 # ./setup.sh) doesn't work reliably: root has no Rust toolchain of its own,
@@ -24,8 +24,8 @@ man:
 # of letting cargo's confusing "could not find Cargo.toml" surface.
 install: man
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		if [ ! -r target/release/cryptc ]; then \
-			echo "error: target/release/cryptc is missing or unreadable as root." >&2; \
+		if [ ! -r target/release/coffer ]; then \
+			echo "error: target/release/coffer is missing or unreadable as root." >&2; \
 			echo "Build it as your normal user first, then install:" >&2; \
 			echo "    make release" >&2; \
 			echo "    sudo make install" >&2; \
@@ -35,12 +35,12 @@ install: man
 	else \
 		$(MAKE) release; \
 	fi
-	install -Dm755 target/release/cryptc $(DESTDIR)$(PREFIX)/bin/cryptc
-	install -Dm644 target/man/cryptc.1.gz $(DESTDIR)$(PREFIX)/share/man/man1/cryptc.1.gz
+	install -Dm755 target/release/coffer $(DESTDIR)$(PREFIX)/bin/coffer
+	install -Dm644 target/man/coffer.1.gz $(DESTDIR)$(PREFIX)/share/man/man1/coffer.1.gz
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/cryptc
-	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/cryptc.1.gz
+	rm -f $(DESTDIR)$(PREFIX)/bin/coffer
+	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/coffer.1.gz
 
 test:
 	cargo test

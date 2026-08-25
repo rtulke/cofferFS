@@ -25,7 +25,7 @@ struct InodeRow {
     symlink_target: Option<String>,
 }
 
-pub struct CryptcFS {
+pub struct CofferFS {
     con: Mutex<Connection>,
     max_size: u64,
     uid: u32,
@@ -34,9 +34,9 @@ pub struct CryptcFS {
     last_activity: Arc<AtomicU64>,
 }
 
-impl CryptcFS {
+impl CofferFS {
     pub fn new(con: Connection, max_size: u64, container_path: &Path) -> Self {
-        CryptcFS {
+        CofferFS {
             con: Mutex::new(con),
             max_size,
             uid: unsafe { libc::getuid() },
@@ -217,7 +217,7 @@ fn to_attr(ino: u64, row: &InodeRow) -> FileAttr {
 
 // --- the actual FUSE filesystem --------------------------------------------
 
-impl Filesystem for CryptcFS {
+impl Filesystem for CofferFS {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         self.touch();
         let Some(name) = name.to_str() else {
@@ -573,10 +573,15 @@ impl Filesystem for CryptcFS {
                     .and_then(|mut s| s.execute(params![existing as i64]));
             }
         }
+        let now = db::now_secs();
         let ok = tx
             .prepare_cached("UPDATE inodes SET parent=?1, name=?2 WHERE ino=?3")
             .and_then(|mut s| s.execute(params![newparent.0 as i64, newname, ino as i64]))
-            .is_ok();
+            .is_ok()
+            && tx
+                .prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino IN (?2, ?3)")
+                .and_then(|mut s| s.execute(params![now, parent.0 as i64, newparent.0 as i64]))
+                .is_ok();
         if !ok || tx.commit().is_err() {
             reply.error(Errno::EIO);
             return;

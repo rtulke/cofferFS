@@ -1,11 +1,11 @@
 [package]
-name = "cryptc"
+name = "coffer"
 version = "0.1.0"
 edition = "2021"
 description = "Growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)"
 license = "MIT"
 authors = ["Robert Tulke <turo@naz.ch>"]
-repository = "https://github.com/rtulke/cryptc"
+repository = "https://github.com/rtulke/cofferFS"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -32,14 +32,14 @@ section = "utils"
 priority = "optional"
 depends = "$auto, fuse3"
 extended-description = """\
-cryptc creates a single-file encrypted container that any user can create \
+coffer creates a single-file encrypted container that any user can create \
 and mount without root or sudo. It's backed by SQLCipher (bundled, \
 statically linked - no system libsqlcipher dependency) and mounted via \
 FUSE. Containers grow automatically as data is written (no fixed size, no \
 resize step), and are crash-safe via SQLite's WAL journal.
 """
 assets = [
-    ["target/release/cryptc", "usr/bin/", "755"],
-    ["target/man/cryptc.1.gz", "usr/share/man/man1/cryptc.1.gz", "644"],
-    ["README.md", "usr/share/doc/cryptc/README.md", "644"],
+    ["target/release/coffer", "usr/bin/", "755"],
+    ["target/man/coffer.1.gz", "usr/share/man/man1/coffer.1.gz", "644"],
+    ["README.md", "usr/share/doc/coffer/README.md", "644"],
 ]

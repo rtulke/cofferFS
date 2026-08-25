@@ -1,4 +1,4 @@
-# cryptc
+# cofferFS
 
 A growable, encrypted, single-file container you create and mount **as a
 normal user — no root, no sudo**. Backed by SQLCipher (statically bundled,
@@ -7,10 +7,10 @@ Once mounted it behaves like an ordinary directory: `cp`, `mv`, `rsync`,
 file managers, all work normally.
 
 ```
-cryptc create vault.cryptc
-cryptc mount  vault.cryptc ~/vault
+coffer create vault.coffer
+coffer mount  vault.coffer ~/vault
 cp -r ~/Documents/secret-stuff ~/vault/
-cryptc umount ~/vault
+coffer umount ~/vault
 ```
 
 ## Install
@@ -20,11 +20,11 @@ cryptc umount ~/vault
 for why there's one per distro rather than a single universal package):
 
 ```bash
-sudo apt-get install ./cryptc_*_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb
+sudo apt-get install ./coffer_*_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb
 ```
 
 Grab the matching `.deb` for your distro from the
-[Releases page](https://github.com/rtulke/cryptc/releases), or build them
+[Releases page](https://github.com/rtulke/cofferFS/releases), or build them
 all yourself (see **Packaging** below).
 
 **From source:**
@@ -32,8 +32,8 @@ all yourself (see **Packaging** below).
 ```bash
 ./setup.sh           # Debian 12/13, Ubuntu 24.04/26.04 - see below
 make build           # after setup.sh once, this is all you need
-sudo make install    # optional: installs to /usr/local/bin/cryptc
-                     # + the cryptc(1) man page
+sudo make install    # optional: installs to /usr/local/bin/coffer
+                     # + the coffer(1) man page
 ```
 
 `setup.sh` is idempotent (safe to re-run) and does three things:
@@ -58,7 +58,7 @@ one-time security approval required).
 
 ## How it works
 
-`vault.cryptc` is a single [SQLCipher](https://www.zetetic.net/sqlcipher/)
+`vault.coffer` is a single [SQLCipher](https://www.zetetic.net/sqlcipher/)
 (encrypted SQLite) database. Directories and files are rows in that
 database; file content is stored in 128 KiB chunks. Mounting is done via
 [FUSE](https://github.com/libfuse/libfuse) through the `fuser` crate, which
@@ -72,7 +72,7 @@ as you write more data into it — there is no `--auto-grow` flag to set and
 no resize step to run, ever. That also means there's no risky "grow the
 filesystem live" operation, which is usually where these containers get
 corrupted. Optionally cap it with `--max-size` at creation time if you want
-a hard ceiling (e.g. `cryptc create vault.cryptc --max-size 10G`); writes
+a hard ceiling (e.g. `coffer create vault.coffer --max-size 10G`); writes
 past that are rejected with ENOSPC instead of silently eating your whole
 disk.
 
@@ -88,21 +88,21 @@ This was the main ask, so it's worth spelling out:
    mount process mid-write loses at most the last unflushed write; it does
    not corrupt the container. This was verified directly while building
    this tool: 1000+ files were written, the mount process was hard-killed
-   mid-write, and `cryptc check` afterwards reported no corruption with
+   mid-write, and `coffer check` afterwards reported no corruption with
    every previously-written file byte-for-byte intact.
 2. **Per-page HMAC integrity.** SQLCipher attaches an HMAC to every 4 KiB
-   page. `cryptc check <file>` runs `PRAGMA cipher_integrity_check` (catches
+   page. `coffer check <file>` runs `PRAGMA cipher_integrity_check` (catches
    tampering/bit-rot at the encryption layer) and `PRAGMA integrity_check`
    (catches structural corruption) without modifying anything. Note: SQLCipher
    itself has a confirmed upstream bug where `cipher_integrity_check`
    misreports every page past the 4GB mark as HMAC-failed on containers
    larger than that (reproduced independently of this project, across two
-   separate SQLCipher builds - not something we can fix here). `cryptc check`
+   separate SQLCipher builds - not something we can fix here). `coffer check`
    detects this specific false-positive pattern and treats `integrity_check`
    (which actually decrypts and verifies every page) as authoritative, so it
    won't cry wolf on a large, healthy container - while still correctly
    failing on real corruption anywhere in the file.
-3. **Live, consistent backups.** `cryptc backup <file> <dest>` uses
+3. **Live, consistent backups.** `coffer backup <file> <dest>` uses
    SQLite's online backup API to make a byte-consistent copy — safe to run
    even while the container is mounted and being written to. Cheap
    insurance; consider cronning it.
@@ -115,7 +115,7 @@ This was the main ask, so it's worth spelling out:
 SQLCipher defaults: AES-256-CBC per page + HMAC-SHA512, key derived from
 your password with PBKDF2. This is solid, standard, "not the point of the
 project" encryption — nobody had to hand-roll a cipher for this to work
-well. Change the password any time with `cryptc passwd <file>`.
+well. Change the password any time with `coffer passwd <file>`.
 
 ### Handling many files
 
@@ -133,21 +133,21 @@ See **Performance at scale** below for the full write-throughput benchmark.
 
 ```bash
 # Create a container (prompts for a password, unlimited size by default)
-cryptc create vault.cryptc
-cryptc create vault.cryptc --max-size 20G     # optional hard ceiling
+coffer create vault.coffer
+coffer create vault.coffer --max-size 20G     # optional hard ceiling
 
 # Mount / unmount (as yourself, no sudo)
-cryptc mount  vault.cryptc ~/vault
-cryptc umount ~/vault
+coffer mount  vault.coffer ~/vault
+coffer umount ~/vault
 
 # Auto-unmount after being idle for a while (no fixed default - opt in)
-cryptc mount  vault.cryptc ~/vault --idle-timeout 30m
+coffer mount  vault.coffer ~/vault --idle-timeout 30m
 
 # Maintenance
-cryptc info   vault.cryptc      # file/dir counts, size on disk vs. logical data
-cryptc check  vault.cryptc      # read-only integrity check (HMAC + structural)
-cryptc backup vault.cryptc vault.bak.cryptc   # consistent copy, safe while mounted
-cryptc passwd vault.cryptc      # change the password
+coffer info   vault.coffer      # file/dir counts, size on disk vs. logical data
+coffer check  vault.coffer      # read-only integrity check (HMAC + structural)
+coffer backup vault.coffer vault.bak.coffer   # consistent copy, safe while mounted
+coffer passwd vault.coffer      # change the password
 ```
 
 ## NFS home directories
@@ -157,15 +157,18 @@ and clusters), unmounting a container whose mountpoint lives under your home
 directory can fail even though you're the one who mounted it: fusermount3's
 setuid-root helper briefly runs as effective root to call `umount2()`, NFS
 maps that squashed root down to `nobody`, and FUSE's owner check then
-rejects it. `cryptc umount` prints a `sudo umount <path>` fallback when this
-happens, but it's simplest to just avoid the situation: create and mount the
+rejects it. (This is different from a plain "device or resource busy" -
+`coffer umount` already retries those automatically with a lazy unmount, no
+sudo needed; see **Design notes** below.) `coffer umount` prints a
+`sudo umount <path>` fallback when the root_squash case above happens, but
+it's simplest to just avoid the situation: create and mount the
 container on a local, non-NFS filesystem instead, e.g. under `/tmp`, and
 symlink it back into your home directory for convenience:
 
 ```bash
 mkdir -p /tmp/vault/dev
-cryptc create /tmp/vault/dev/vault.cryptc
-cryptc mount  /tmp/vault/dev/vault.cryptc /tmp/vault/dev/mnt
+coffer create /tmp/vault/dev/vault.coffer
+coffer mount  /tmp/vault/dev/vault.coffer /tmp/vault/dev/mnt
 ln -sT /tmp/vault/dev ~/dev
 ```
 
@@ -177,7 +180,7 @@ somewhere local but persistent instead.
 
 ## Auto-unmount on idle
 
-`cryptc mount --idle-timeout 30m` (accepts `s`/`m`/`h`/`d` suffixes, e.g.
+`coffer mount --idle-timeout 30m` (accepts `s`/`m`/`h`/`d` suffixes, e.g.
 `45s`, `2h`) unmounts the container itself after it's seen no filesystem
 activity for that long - no separate daemon, cron job, or systemd timer
 needed. This is tracked inside the FUSE process: every handled call
@@ -201,6 +204,13 @@ periodically scanning the mount will keep resetting the timer).
   operation is always all-or-nothing.
 - `mount` daemonizes by default (returns control to the shell immediately);
   pass `--foreground` to keep it attached for debugging.
+- `umount` (and the idle-timeout watcher) automatically retries a failed
+  unmount with a lazy unmount (`fusermount3 -u -z`) before giving up - this
+  is what resolves the common "device or resource busy" case (e.g. a crashed
+  mount daemon the kernel hasn't finished tearing down yet), entirely within
+  the mounting user's own permissions, no sudo involved. The plain attempt's
+  own error output is suppressed so a routine escalation doesn't look like a
+  failure; only a genuine final failure prints anything.
 - Password prompts mask input on a real terminal; if stdin isn't a TTY
   (piping, scripting), it falls back to a visible plain-text read.
 - Rust was chosen over C for the compiler's memory safety (removes an
@@ -246,13 +256,13 @@ at a time on an otherwise idle machine.
 
 ## Known upstream SQLCipher bug (not ours, but worth knowing about)
 
-While verifying integrity on the 12GB benchmark container, `cryptc check`
+While verifying integrity on the 12GB benchmark container, `coffer check`
 reported hundreds of thousands of "corrupt" pages, all starting at exactly
 page 1,048,577 - which, at 4096 bytes/page, is precisely the 4GB mark
 (2^32 bytes). That's too precise to be real corruption, so it was run down:
 
 - Reproduced with a **30-line program using nothing but `rusqlite` +
-  SQLCipher** - no FUSE, no cryptc schema, just a table with a BLOB column,
+  SQLCipher** - no FUSE, no coffer schema, just a table with a BLOB column,
   written to past 4GB and integrity-checked. Same failure, same exact page.
 - Reproduced identically across **two independent SQLCipher builds**:
   Ubuntu's `libsqlcipher-dev` package, and a from-source build via
@@ -266,7 +276,7 @@ page 1,048,577 - which, at 4096 bytes/page, is precisely the 4GB mark
 
 Conclusion: `PRAGMA cipher_integrity_check` has a real bug in its own page-
 iteration logic for databases past 4GB, independent of this project. The
-data itself is fine. `cryptc check` detects this specific pattern - a page
+data itself is fine. `coffer check` detects this specific pattern - a page
 number past the 4GB boundary flagged by `cipher_integrity_check` while
 `integrity_check` passes cleanly - and reports the container as healthy
 with an explanatory note, while still failing loudly on genuine corruption
@@ -280,7 +290,7 @@ page 1,048,577 (4096-byte pages) - reported upstream as
 Confirmed by the maintainer as already fixed in SQLCipher 4.17.0. This
 project vendors SQLCipher through `rusqlite`'s
 `bundled-sqlcipher-vendored-openssl` feature (`libsqlite3-sys`), which as
-of writing still bundles 4.14.0 (predates the fix), so `cryptc check`'s
+of writing still bundles 4.14.0 (predates the fix), so `coffer check`'s
 workaround above remains necessary until that crate updates its vendored
 copy.
 
@@ -302,9 +312,9 @@ copy.
   the database but the container file itself doesn't shrink automatically
   (SQLite reuses that freed space for future writes though). Run `VACUUM`
   via the `sqlcipher` command-line shell manually if you need to reclaim
-  disk space after large deletions, or add a `cryptc compact` subcommand.
+  disk space after large deletions, or add a `coffer compact` subcommand.
 - **`cipher_integrity_check` false positives past 4GB.** See above -
-  `cryptc check` already works around this, but be aware if you ever run
+  `coffer check` already works around this, but be aware if you ever run
   the raw `PRAGMA cipher_integrity_check` yourself against a large
   container.
 
@@ -313,13 +323,13 @@ copy.
 `packaging/build-deb.sh` builds **one `.deb` per target distro**, each
 natively inside that distro's own container, via
 [cargo-deb](https://github.com/kornelski/cargo-deb). Output goes to
-`dist/cryptc_<version>_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb`.
-Every package also installs the `cryptc(1)` man page
-(`packaging/cryptc.1`, gzipped by `make man` before `cargo deb` runs - see
+`dist/coffer_<version>_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb`.
+Every package also installs the `coffer(1)` man page
+(`packaging/coffer.1`, gzipped by `make man` before `cargo deb` runs - see
 the Makefile) to `/usr/share/man/man1/`.
 
 ```bash
-packaging/build-deb.sh          # -> dist/cryptc_*_<id>_amd64.deb (all 4)
+packaging/build-deb.sh          # -> dist/coffer_*_<id>_amd64.deb (all 4)
 packaging/test-install.sh       # installs each into a matching fresh
                                  # container and runs a full create/mount/
                                  # write/read/umount/check cycle
@@ -361,7 +371,7 @@ checking that install succeeds).
 
 All four packages pass the full `test-install.sh` cycle (install, create,
 mount, write, read, unmount, check). On the two SONAME-3 targets (Debian 12,
-Ubuntu 24.04, both shipping libfuse3 3.14.0) `cryptc mount` prints
+Ubuntu 24.04, both shipping libfuse3 3.14.0) `coffer mount` prints
 `fuse: warning: library too old, some operations may not work` - cosmetic,
 every operation in the test cycle (including the ones the warning calls
 out) works correctly regardless; it doesn't appear on the newer SONAME-4
@@ -373,7 +383,7 @@ targets (Debian 13's 3.17.2, Ubuntu 26.04's 3.18.2).
 - `Cargo.toml` / `Cargo.lock` — dependencies and the `cargo-deb` packaging
   metadata
 - `Makefile` — `make build` / `make install` / `make man`
-- `packaging/` — the `cryptc(1)` man page and the per-distro `.deb` build
+- `packaging/` — the `coffer(1)` man page and the per-distro `.deb` build
   scripts (see **Packaging** above)
 - `.github/workflows/release.yml` — builds a `.deb` per target distro and
   publishes it to GitHub Releases

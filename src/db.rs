@@ -121,7 +121,7 @@ pub fn open_db(path: &Path, password: &str, readonly: bool) -> Result<Connection
         |r| r.get(0),
     );
     if check.is_err() {
-        bail!("wrong password, or the file is not a cryptc container");
+        bail!("wrong password, or the file is not a coffer container");
     }
 
     if !readonly {

@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// cryptc - growable encrypted containers, mountable as a normal user.
+/// coffer - growable encrypted containers, mountable as a normal user.
 #[derive(Parser)]
-#[command(name = "cryptc")]
+#[command(name = "coffer")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -108,9 +108,9 @@ fn cmd_create(file: &Path, max_size: Option<String>) -> Result<()> {
     let password = read_password(true)?;
     db::create_container(file, &password, max_size)?;
     if max_size > 0 {
-        println!("cryptc: created {} (grows automatically up to {} bytes)", file.display(), max_size);
+        println!("coffer: created {} (grows automatically up to {} bytes)", file.display(), max_size);
     } else {
-        println!("cryptc: created {} (grows automatically, no ceiling)", file.display());
+        println!("coffer: created {} (grows automatically, no ceiling)", file.display());
     }
     Ok(())
 }
@@ -128,7 +128,7 @@ fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool, idle_timeout: Opt
     let abs_mountpoint = mountpoint.canonicalize()?;
     let abs_file = file.canonicalize()?;
 
-    println!("cryptc: mounting {} at {}", file.display(), mountpoint.display());
+    println!("coffer: mounting {} at {}", file.display(), mountpoint.display());
 
     if !foreground {
         use daemonize::{Daemonize, Stdio};
@@ -140,13 +140,13 @@ fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool, idle_timeout: Opt
             .context("failed to daemonize")?;
     }
 
-    let filesystem = fs::CryptcFS::new(con, max_size, &abs_file);
+    let filesystem = fs::CofferFS::new(con, max_size, &abs_file);
     if let Some(timeout) = idle_timeout {
         spawn_idle_watcher(abs_mountpoint.clone(), filesystem.last_activity(), timeout);
     }
     let mut config = fuser::Config::default();
     config.mount_options = vec![
-        fuser::MountOption::FSName("cryptc".into()),
+        fuser::MountOption::FSName("coffer".into()),
         fuser::MountOption::NoDev,
         fuser::MountOption::NoSuid,
     ];
@@ -154,7 +154,7 @@ fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool, idle_timeout: Opt
     Ok(())
 }
 
-// Every handled FUSE call refreshes CryptcFS::last_activity (see fs.rs); this
+// Every handled FUSE call refreshes CofferFS::last_activity (see fs.rs); this
 // just polls that shared counter and unmounts itself - as the same uid that
 // mounted it - once it's been idle past the configured timeout. Poll interval
 // is capped at 30s so the actual unmount never lags the deadline by more than
@@ -166,7 +166,7 @@ fn spawn_idle_watcher(mountpoint: PathBuf, last_activity: Arc<AtomicU64>, timeou
         let idle_for = db::now_secs() - last_activity.load(Ordering::Relaxed) as f64;
         if idle_for >= timeout.as_secs_f64() {
             eprintln!(
-                "cryptc: idle for {}s (limit {}s), auto-unmounting {}",
+                "coffer: idle for {}s (limit {}s), auto-unmounting {}",
                 idle_for as u64,
                 timeout.as_secs(),
                 mountpoint.display()
@@ -177,13 +177,46 @@ fn spawn_idle_watcher(mountpoint: PathBuf, last_activity: Arc<AtomicU64>, timeou
     });
 }
 
+// A plain unmount can fail with "Device or resource busy" when the kernel
+// hasn't finished tearing down a stale FUSE connection yet (e.g. the server
+// process crashed and something still references the mount). Escalating to
+// a lazy unmount - detach the mountpoint now, finish cleanup once nothing
+// still references it - resolves that without needing root: it's the same
+// mounting-user permissions as the plain unmount, just a different kernel-
+// side detach mode, so no sudo involved here.
 fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
+    // The plain attempt's own output is suppressed: if it fails it's usually
+    // just "device or resource busy" en route to the lazy retry succeeding,
+    // and showing that would look like a real error for what's actually a
+    // routine, silent escalation. If the lazy attempt fails too, its output
+    // is left visible - that's a genuine failure worth seeing.
     for candidate in ["fusermount3", "fusermount"] {
         if which(candidate).is_some() {
-            return std::process::Command::new(candidate).arg("-u").arg(mountpoint).status();
+            let status = std::process::Command::new(candidate)
+                .arg("-u")
+                .arg(mountpoint)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            if status.success() {
+                return Ok(status);
+            }
+            return std::process::Command::new(candidate)
+                .arg("-u")
+                .arg("-z")
+                .arg(mountpoint)
+                .status();
         }
     }
-    std::process::Command::new("umount").arg(mountpoint).status()
+    let status = std::process::Command::new("umount")
+        .arg(mountpoint)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        return Ok(status);
+    }
+    std::process::Command::new("umount").arg("-l").arg(mountpoint).status()
 }
 
 fn cmd_umount(mountpoint: &Path) -> Result<()> {
@@ -310,7 +343,7 @@ fn cmd_backup(file: &Path, dest: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600))?;
     }
-    println!("cryptc: consistent backup written to {}", dest.display());
+    println!("coffer: consistent backup written to {}", dest.display());
     Ok(())
 }
 
@@ -321,7 +354,7 @@ fn cmd_passwd(file: &Path) -> Result<()> {
     println!("New password:");
     let new = read_password(true)?;
     con.execute_batch(&db::pragma_key_sql("rekey", &new))?;
-    println!("cryptc: password changed.");
+    println!("coffer: password changed.");
     Ok(())
 }
 

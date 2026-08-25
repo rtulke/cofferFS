@@ -3,9 +3,9 @@
 CLAUDE.md
 __pycache__/
 *.pyc
-*.cryptc
-*.cryptc-wal
-*.cryptc-shm
+*.coffer
+*.coffer-wal
+*.coffer-shm
 /target/
 /target-*/
 dist/
@@ -14,6 +14,6 @@ build.log
 
 # Python reference implementation: kept locally, not published to GitHub -
 # only the Rust port (now at the repo root) is tracked and released.
-/cryptc
+/coffer
 /requirements.txt
 /setup-python.sh
