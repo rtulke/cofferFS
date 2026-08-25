@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sets up the build environment for the Rust cryptc rewrite.
+# Sets up the build environment for the Rust coffer rewrite.
 # Tested targets: Ubuntu 24.04, Ubuntu 26.04, Debian 12 (bookworm), Debian 13 (trixie).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -43,10 +43,10 @@ fi
 # shellcheck disable=SC1090
 source "$HOME/.cargo/env"
 
-echo "==> Building cryptc (release)"
+echo "==> Building coffer (release)"
 cargo build --release
 
-BIN="target/release/cryptc"
+BIN="target/release/coffer"
 echo
 echo "Done. Binary at: $BIN"
 echo "To use cargo/rustc in new shells:  source \"\$HOME/.cargo/env\""
@@ -57,22 +57,22 @@ if [ "$(id -u)" -eq 0 ]; then
     # Already root (e.g. this script itself was run via sudo) - just install,
     # no need to ask and no sudo-into-a-locked-down-$HOME problem to dodge.
     echo "==> Running as root, installing to /usr/local/bin"
-    install -Dm755 "$BIN" /usr/local/bin/cryptc
-    echo "Installed: /usr/local/bin/cryptc"
+    install -Dm755 "$BIN" /usr/local/bin/coffer
+    echo "Installed: /usr/local/bin/coffer"
 elif [ ! -t 0 ]; then
     echo "Not installed (non-interactive shell, skipping the install prompt)."
     echo "Install later with:   make install PREFIX=\$HOME/.local   (no sudo)"
     echo "                  or: sudo make install                  (system-wide)"
 else
-    echo "Where should cryptc be installed?"
-    echo "  1) Just for you, no sudo needed  (~/.local/bin/cryptc)"
-    echo "  2) System-wide for all users     (/usr/local/bin/cryptc, needs sudo)"
+    echo "Where should coffer be installed?"
+    echo "  1) Just for you, no sudo needed  (~/.local/bin/coffer)"
+    echo "  2) System-wide for all users     (/usr/local/bin/coffer, needs sudo)"
     echo "  3) Don't install it - I'll copy the binary myself"
     read -rp "Choice [1-3, default 1]: " choice || choice=3
     case "${choice:-1}" in
         1)
             make install PREFIX="$HOME/.local" >/dev/null
-            echo "Installed: $HOME/.local/bin/cryptc"
+            echo "Installed: $HOME/.local/bin/coffer"
             case ":$PATH:" in
                 *":$HOME/.local/bin:"*) ;;
                 *)
@@ -91,20 +91,20 @@ else
             TMP_BIN="$(mktemp)"
             TMP_MAN="$(mktemp)"
             cp "$BIN" "$TMP_BIN"
-            cp target/man/cryptc.1.gz "$TMP_MAN"
-            sudo install -Dm755 "$TMP_BIN" /usr/local/bin/cryptc
-            sudo install -Dm644 "$TMP_MAN" /usr/local/share/man/man1/cryptc.1.gz
+            cp target/man/coffer.1.gz "$TMP_MAN"
+            sudo install -Dm755 "$TMP_BIN" /usr/local/bin/coffer
+            sudo install -Dm644 "$TMP_MAN" /usr/local/share/man/man1/coffer.1.gz
             rm -f "$TMP_BIN" "$TMP_MAN"
-            echo "Installed: /usr/local/bin/cryptc"
+            echo "Installed: /usr/local/bin/coffer"
             ;;
         3)
-            echo "Not installed. Run it directly:   ./$BIN create myvault.cryptc"
+            echo "Not installed. Run it directly:   ./$BIN create myvault.coffer"
             echo "Install later with:   make install PREFIX=\$HOME/.local   (no sudo)"
             echo "                  or: sudo make install                  (system-wide)"
             ;;
         *)
             echo "Unrecognized choice '$choice', not installing." >&2
-            echo "Run it directly:   ./$BIN create myvault.cryptc"
+            echo "Run it directly:   ./$BIN create myvault.coffer"
             ;;
     esac
 fi

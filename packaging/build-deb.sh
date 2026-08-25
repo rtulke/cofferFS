@@ -28,7 +28,7 @@ declare -A TARGET_IMAGES=(
 )
 
 mkdir -p dist
-rm -f dist/cryptc_*.deb
+rm -f dist/coffer_*.deb
 
 for id in "${TARGET_IDS[@]}"; do
     img="${TARGET_IMAGES[$id]}"

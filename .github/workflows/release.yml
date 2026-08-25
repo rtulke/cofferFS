@@ -131,18 +131,18 @@ jobs:
             ${{ matrix.image }} \
             bash -euxc '
               apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /work/cryptc_*.deb
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /work/coffer_*.deb
 
               mkdir -p /root/mnt
-              printf "testpass\ntestpass\n" | cryptc create /root/vault.cryptc
-              printf "testpass\n" | cryptc mount /root/vault.cryptc /root/mnt --foreground &
+              printf "testpass\ntestpass\n" | coffer create /root/vault.coffer
+              printf "testpass\n" | coffer mount /root/vault.coffer /root/mnt --foreground &
               MOUNT_PID=$!
               sleep 1
               echo "hello from CI" > /root/mnt/f.txt
               grep -q "hello from CI" /root/mnt/f.txt
               fusermount3 -u /root/mnt
               wait "$MOUNT_PID" 2>/dev/null || true
-              printf "testpass\n" | cryptc check /root/vault.cryptc
+              printf "testpass\n" | coffer check /root/vault.coffer
             '
 
   release:
@@ -168,10 +168,10 @@ jobs:
             echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "title=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "notes=cryptc $GITHUB_REF_NAME - one .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" >> "$GITHUB_OUTPUT"
+            echo "notes=coffer $GITHUB_REF_NAME - one .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" >> "$GITHUB_OUTPUT"
           else
             echo "tag=latest" >> "$GITHUB_OUTPUT"
-            echo "title=cryptc (main, rolling build)" >> "$GITHUB_OUTPUT"
+            echo "title=coffer (main, rolling build)" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
             echo "notes=Rolling build of main@${GITHUB_SHA::7} - not a stable release, see the tagged vX.Y.Z releases for that. One .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" >> "$GITHUB_OUTPUT"
           fi

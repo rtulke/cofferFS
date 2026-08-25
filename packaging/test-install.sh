@@ -19,7 +19,7 @@ declare -A TARGET_IMAGES=(
 
 for id in "${!TARGET_IMAGES[@]}"; do
     img="${TARGET_IMAGES[$id]}"
-    DEB=$(ls dist/cryptc_*_"${id}"_amd64.deb 2>/dev/null | head -1)
+    DEB=$(ls dist/coffer_*_"${id}"_amd64.deb 2>/dev/null | head -1)
     if [ -z "$DEB" ]; then
         echo "no .deb for $id in dist/ - run packaging/build-deb.sh first" >&2
         exit 1
@@ -31,17 +31,17 @@ for id in "${!TARGET_IMAGES[@]}"; do
     "$RUNTIME" run --rm \
         --cap-add SYS_ADMIN --device /dev/fuse \
         --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-        -v "$PWD/$DEB:/tmp/cryptc.deb:Z,ro" \
+        -v "$PWD/$DEB:/tmp/coffer.deb:Z,ro" \
         "$img" \
         bash -euxc '
             apt-get update -qq
-            apt-get install -y --no-install-recommends /tmp/cryptc.deb
+            apt-get install -y --no-install-recommends /tmp/coffer.deb
 
-            cryptc --help
+            coffer --help
 
             mkdir -p /root/mnt
-            printf "testpass\ntestpass\n" | cryptc create /root/vault.cryptc
-            printf "testpass\n" | cryptc mount /root/vault.cryptc /root/mnt --foreground &
+            printf "testpass\ntestpass\n" | coffer create /root/vault.coffer
+            printf "testpass\n" | coffer mount /root/vault.coffer /root/mnt --foreground &
             MOUNT_PID=$!
             sleep 1
             echo "hello from container test" > /root/mnt/f.txt
@@ -51,7 +51,7 @@ for id in "${!TARGET_IMAGES[@]}"; do
             fusermount3 -u /root/mnt
             wait "$MOUNT_PID" 2>/dev/null || true
 
-            printf "testpass\n" | cryptc check /root/vault.cryptc
+            printf "testpass\n" | coffer check /root/vault.coffer
 
             echo "OK: install + create + mount + write + read + umount + check all worked"
         '
