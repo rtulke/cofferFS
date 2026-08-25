@@ -147,6 +147,31 @@ cryptc backup vault.cryptc vault.bak.cryptc   # consistent copy, safe while moun
 cryptc passwd vault.cryptc      # change the password
 ```
 
+## NFS home directories
+
+If `$HOME` is NFS-mounted with `root_squash` (common on shared workstations
+and clusters), unmounting a container whose mountpoint lives under your home
+directory can fail even though you're the one who mounted it: fusermount3's
+setuid-root helper briefly runs as effective root to call `umount2()`, NFS
+maps that squashed root down to `nobody`, and FUSE's owner check then
+rejects it. `cryptc umount` prints a `sudo umount <path>` fallback when this
+happens, but it's simplest to just avoid the situation: create and mount the
+container on a local, non-NFS filesystem instead, e.g. under `/tmp`, and
+symlink it back into your home directory for convenience:
+
+```bash
+mkdir -p /tmp/vault/dev
+cryptc create /tmp/vault/dev/vault.cryptc
+cryptc mount  /tmp/vault/dev/vault.cryptc /tmp/vault/dev/mnt
+ln -sT /tmp/vault/dev ~/dev
+```
+
+`~/dev` now transparently resolves to the local working copy, but the
+container and its mountpoint never touch NFS, so unmounting works normally
+without `sudo`. Keep in mind `/tmp` is typically cleared on reboot, so if the
+container itself (not just the mountpoint) needs to survive a reboot, put it
+somewhere local but persistent instead.
+
 ## Design notes
 
 - Inode numbers are `AUTOINCREMENT` (never reused), avoiding a FUSE
