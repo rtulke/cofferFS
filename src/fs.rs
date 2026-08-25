@@ -7,7 +7,8 @@ use fuser::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(1);
@@ -30,6 +31,7 @@ pub struct CryptcFS {
     uid: u32,
     gid: u32,
     container_dir: PathBuf,
+    last_activity: Arc<AtomicU64>,
 }
 
 impl CryptcFS {
@@ -44,7 +46,18 @@ impl CryptcFS {
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new("."))
                 .to_path_buf(),
+            last_activity: Arc::new(AtomicU64::new(db::now_secs() as u64)),
         }
+    }
+
+    /// Shared handle an idle-timeout watcher can poll from outside the FUSE
+    /// loop; every handled call below refreshes it via `touch()`.
+    pub fn last_activity(&self) -> Arc<AtomicU64> {
+        self.last_activity.clone()
+    }
+
+    fn touch(&self) {
+        self.last_activity.store(db::now_secs() as u64, Ordering::Relaxed);
     }
 }
 
@@ -206,6 +219,7 @@ fn to_attr(ino: u64, row: &InodeRow) -> FileAttr {
 
 impl Filesystem for CryptcFS {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        self.touch();
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -222,6 +236,7 @@ impl Filesystem for CryptcFS {
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        self.touch();
         let con = self.con.lock().unwrap();
         match row_by_ino(&con, ino.0) {
             Ok(Some(row)) => reply.attr(&TTL, &to_attr(ino.0, &row)),
@@ -249,6 +264,7 @@ impl Filesystem for CryptcFS {
         _flags: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        self.touch();
         let mut con = self.con.lock().unwrap();
         let tx = match con.transaction() {
             Ok(t) => t,
@@ -309,6 +325,7 @@ impl Filesystem for CryptcFS {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        self.touch();
         let con = self.con.lock().unwrap();
         match row_by_ino(&con, ino.0) {
             Ok(Some(row)) => reply.data(row.symlink_target.unwrap_or_default().as_bytes()),
@@ -326,6 +343,7 @@ impl Filesystem for CryptcFS {
         _umask: u32,
         reply: ReplyEntry,
     ) {
+        self.touch();
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -368,6 +386,7 @@ impl Filesystem for CryptcFS {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        self.touch();
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -412,6 +431,7 @@ impl Filesystem for CryptcFS {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        self.touch();
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -474,6 +494,7 @@ impl Filesystem for CryptcFS {
         target: &Path,
         reply: ReplyEntry,
     ) {
+        self.touch();
         let (Some(name), Some(target_str)) = (link_name.to_str(), target.to_str()) else {
             reply.error(Errno::EINVAL);
             return;
@@ -518,6 +539,7 @@ impl Filesystem for CryptcFS {
         _flags: fuser::RenameFlags,
         reply: ReplyEmpty,
     ) {
+        self.touch();
         let (Some(name), Some(newname)) = (name.to_str(), newname.to_str()) else {
             reply.error(Errno::EINVAL);
             return;
@@ -563,6 +585,7 @@ impl Filesystem for CryptcFS {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, _flags: fuser::OpenFlags, reply: ReplyOpen) {
+        self.touch();
         reply.opened(FileHandle(ino.0), fuser::FopenFlags::empty());
     }
 
@@ -576,6 +599,7 @@ impl Filesystem for CryptcFS {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+        self.touch();
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -643,6 +667,7 @@ impl Filesystem for CryptcFS {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyData,
     ) {
+        self.touch();
         let ino = fh.0;
         let con = self.con.lock().unwrap();
         let file_size = match row_by_ino(&con, ino) {
@@ -695,6 +720,7 @@ impl Filesystem for CryptcFS {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
     ) {
+        self.touch();
         let ino = fh.0;
         let mut con = self.con.lock().unwrap();
         let tx = match con.transaction() {
@@ -771,10 +797,12 @@ impl Filesystem for CryptcFS {
         _lock_owner: fuser::LockOwner,
         reply: ReplyEmpty,
     ) {
+        self.touch();
         reply.ok();
     }
 
     fn fsync(&self, _req: &Request, _ino: INodeNo, _fh: FileHandle, _datasync: bool, reply: ReplyEmpty) {
+        self.touch();
         reply.ok();
     }
 
@@ -788,14 +816,17 @@ impl Filesystem for CryptcFS {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        self.touch();
         reply.ok();
     }
 
     fn opendir(&self, _req: &Request, _ino: INodeNo, _flags: fuser::OpenFlags, reply: ReplyOpen) {
+        self.touch();
         reply.opened(FileHandle(0), fuser::FopenFlags::empty());
     }
 
     fn readdir(&self, _req: &Request, ino: INodeNo, _fh: FileHandle, offset: u64, mut reply: ReplyDirectory) {
+        self.touch();
         let con = self.con.lock().unwrap();
         let parent_ino: u64 = if ino.0 == ROOT_INO {
             ROOT_INO
@@ -848,6 +879,7 @@ impl Filesystem for CryptcFS {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
+        self.touch();
         let con = self.con.lock().unwrap();
         let used = current_total_size(&con).unwrap_or(0);
         let (blocks, bfree, bavail) = if self.max_size > 0 {
@@ -868,6 +900,7 @@ impl Filesystem for CryptcFS {
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: fuser::AccessFlags, reply: ReplyEmpty) {
+        self.touch();
         reply.ok(); // single-user container: whoever mounted it gets full access
     }
 }

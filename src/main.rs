@@ -4,8 +4,11 @@ mod fs;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-/// cryptc - growable encrypted containers (SQLCipher + FUSE), mountable as a normal user.
+/// cryptc - growable encrypted containers, mountable as a normal user.
 #[derive(Parser)]
 #[command(name = "cryptc")]
 struct Cli {
@@ -29,6 +32,9 @@ enum Cmd {
         /// Stay in the foreground instead of daemonizing
         #[arg(long)]
         foreground: bool,
+        /// Auto-unmount after this long with no filesystem activity, e.g. 30m, 2h (default: never)
+        #[arg(long)]
+        idle_timeout: Option<String>,
     },
     /// Unmount a container
     Umount { mountpoint: PathBuf },
@@ -53,6 +59,19 @@ fn parse_size(s: &str) -> Result<u64> {
     };
     let value: f64 = num.parse().context("invalid size")?;
     Ok((value * mult as f64) as u64)
+}
+
+fn parse_duration(s: &str) -> Result<Duration> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('s') => (&s[..s.len() - 1], 1u64),
+        Some('m') => (&s[..s.len() - 1], 60u64),
+        Some('h') => (&s[..s.len() - 1], 3600u64),
+        Some('d') => (&s[..s.len() - 1], 86400u64),
+        _ => (s, 1u64),
+    };
+    let value: f64 = num.parse().context("invalid duration")?;
+    Ok(Duration::from_secs_f64(value * mult as f64))
 }
 
 /// Prompts on the real TTY when there is one (masked input); falls back to a
@@ -96,7 +115,8 @@ fn cmd_create(file: &Path, max_size: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool) -> Result<()> {
+fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool, idle_timeout: Option<String>) -> Result<()> {
+    let idle_timeout = idle_timeout.map(|s| parse_duration(&s)).transpose()?;
     let password = read_password(false)?;
     let con = db::open_db(file, &password, false)?;
     let max_size = db::read_max_size(&con);
@@ -121,6 +141,9 @@ fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool) -> Result<()> {
     }
 
     let filesystem = fs::CryptcFS::new(con, max_size, &abs_file);
+    if let Some(timeout) = idle_timeout {
+        spawn_idle_watcher(abs_mountpoint.clone(), filesystem.last_activity(), timeout);
+    }
     let mut config = fuser::Config::default();
     config.mount_options = vec![
         fuser::MountOption::FSName("cryptc".into()),
@@ -131,20 +154,40 @@ fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_umount(mountpoint: &Path) -> Result<()> {
+// Every handled FUSE call refreshes CryptcFS::last_activity (see fs.rs); this
+// just polls that shared counter and unmounts itself - as the same uid that
+// mounted it - once it's been idle past the configured timeout. Poll interval
+// is capped at 30s so the actual unmount never lags the deadline by more than
+// that, regardless of how long the timeout itself is.
+fn spawn_idle_watcher(mountpoint: PathBuf, last_activity: Arc<AtomicU64>, timeout: Duration) {
+    let poll = timeout.min(Duration::from_secs(30)).max(Duration::from_secs(1));
+    std::thread::spawn(move || loop {
+        std::thread::sleep(poll);
+        let idle_for = db::now_secs() - last_activity.load(Ordering::Relaxed) as f64;
+        if idle_for >= timeout.as_secs_f64() {
+            eprintln!(
+                "cryptc: idle for {}s (limit {}s), auto-unmounting {}",
+                idle_for as u64,
+                timeout.as_secs(),
+                mountpoint.display()
+            );
+            let _ = run_unmount(&mountpoint);
+            return;
+        }
+    });
+}
+
+fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
     for candidate in ["fusermount3", "fusermount"] {
         if which(candidate).is_some() {
-            let status = std::process::Command::new(candidate)
-                .arg("-u")
-                .arg(mountpoint)
-                .status()?;
-            if !status.success() {
-                hint_sudo_umount(mountpoint);
-            }
-            std::process::exit(status.code().unwrap_or(1));
+            return std::process::Command::new(candidate).arg("-u").arg(mountpoint).status();
         }
     }
-    let status = std::process::Command::new("umount").arg(mountpoint).status()?;
+    std::process::Command::new("umount").arg(mountpoint).status()
+}
+
+fn cmd_umount(mountpoint: &Path) -> Result<()> {
+    let status = run_unmount(mountpoint)?;
     if !status.success() {
         hint_sudo_umount(mountpoint);
     }
@@ -311,7 +354,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Create { file, max_size } => cmd_create(&file, max_size),
-        Cmd::Mount { file, mountpoint, foreground } => cmd_mount(&file, &mountpoint, foreground),
+        Cmd::Mount { file, mountpoint, foreground, idle_timeout } => {
+            cmd_mount(&file, &mountpoint, foreground, idle_timeout)
+        }
         Cmd::Umount { mountpoint } => cmd_umount(&mountpoint),
         Cmd::Check { file } => cmd_check(&file),
         Cmd::Backup { file, dest } => cmd_backup(&file, &dest),
