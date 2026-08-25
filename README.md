@@ -140,6 +140,9 @@ cryptc create vault.cryptc --max-size 20G     # optional hard ceiling
 cryptc mount  vault.cryptc ~/vault
 cryptc umount ~/vault
 
+# Auto-unmount after being idle for a while (no fixed default - opt in)
+cryptc mount  vault.cryptc ~/vault --idle-timeout 30m
+
 # Maintenance
 cryptc info   vault.cryptc      # file/dir counts, size on disk vs. logical data
 cryptc check  vault.cryptc      # read-only integrity check (HMAC + structural)
@@ -171,6 +174,23 @@ container and its mountpoint never touch NFS, so unmounting works normally
 without `sudo`. Keep in mind `/tmp` is typically cleared on reboot, so if the
 container itself (not just the mountpoint) needs to survive a reboot, put it
 somewhere local but persistent instead.
+
+## Auto-unmount on idle
+
+`cryptc mount --idle-timeout 30m` (accepts `s`/`m`/`h`/`d` suffixes, e.g.
+`45s`, `2h`) unmounts the container itself after it's seen no filesystem
+activity for that long - no separate daemon, cron job, or systemd timer
+needed. This is tracked inside the FUSE process: every handled call
+(open, read, write, readdir, ...) refreshes a last-activity timestamp, and
+a background thread in the same process polls it and shells out to
+`fusermount3 -u` once the idle threshold is crossed. Since it's the mount's
+own owner unmounting it, this doesn't hit the NFS/`root_squash` wrinkle
+described above.
+
+Off by default - pass `--idle-timeout` explicitly to opt in. Note that
+*any* filesystem call counts as activity, including ones triggered by
+something other than you directly (a backup tool or file indexer
+periodically scanning the mount will keep resetting the timer).
 
 ## Design notes
 

@@ -1,6 +1,6 @@
 .TH CRYPTC 1 "2026-08-14" "cryptc 0.1.0" "User Commands"
 .SH NAME
-cryptc \- growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)
+cryptc \- growable, user-mountable encrypted single-file containers
 .SH SYNOPSIS
 .B cryptc create
 .I file
@@ -10,6 +10,8 @@ cryptc \- growable, user-mountable encrypted single-file containers (SQLCipher +
 .B cryptc mount
 .I file mountpoint
 .RB [ \-\-foreground ]
+.RB [ \-\-idle\-timeout
+.IR DURATION ]
 .br
 .B cryptc umount
 .I mountpoint
@@ -68,7 +70,7 @@ e.g.
 .BR 10G )
 to reject writes past a fixed ceiling with ENOSPC instead.
 .TP
-.BI "mount " file " " mountpoint " [\-\-foreground]"
+.BI "mount " file " " mountpoint " [\-\-foreground] [\-\-idle\-timeout " DURATION ]
 Mount
 .I file
 at
@@ -81,6 +83,14 @@ daemonizes and returns control to the shell immediately; pass
 .B \-\-foreground
 to keep it attached (useful for debugging \- errors and FUSE
 diagnostics print to the terminal instead of being discarded).
+.B \-\-idle\-timeout
+.RI ( DURATION
+is a plain second count or a number suffixed with
+.BR s / m / h / d ,
+e.g.
+.BR 30m )
+auto\-unmounts the container after it has seen no filesystem activity for
+that long. Off by default.
 .TP
 .BI "umount " mountpoint
 Unmount a container previously mounted at
