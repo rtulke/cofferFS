@@ -38,6 +38,10 @@ enum Cmd {
         /// Auto-unmount after this long with no filesystem activity, e.g. 30m, 2h (default: never)
         #[arg(long)]
         idle_timeout: Option<String>,
+        /// Auto-compact (VACUUM) after this long idle, but only if there's a
+        /// meaningful amount of reclaimable space (default: never)
+        #[arg(long)]
+        compact_on_idle: Option<String>,
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
@@ -191,9 +195,11 @@ fn cmd_mount(
     mountpoint: &Path,
     foreground: bool,
     idle_timeout: Option<String>,
+    compact_on_idle: Option<String>,
     password_file: Option<&Path>,
 ) -> Result<()> {
     let idle_timeout = idle_timeout.map(|s| parse_duration(&s)).transpose()?;
+    let compact_on_idle = compact_on_idle.map(|s| parse_duration(&s)).transpose()?;
     let password = read_password_source(password_file, false)?;
     let con = db::open_db(file, &password, false)?;
     let max_size = db::read_max_size(&con);
@@ -227,6 +233,14 @@ fn cmd_mount(
     if let Some(timeout) = idle_timeout {
         spawn_idle_watcher(abs_mountpoint.clone(), filesystem.last_activity(), timeout);
     }
+    if let Some(threshold) = compact_on_idle {
+        spawn_compact_on_idle_watcher(
+            filesystem.connection_handle(),
+            filesystem.last_activity(),
+            abs_file.clone(),
+            threshold,
+        );
+    }
     let mut config = fuser::Config::default();
     config.mount_options = vec![
         fuser::MountOption::FSName("coffer".into()),
@@ -256,6 +270,58 @@ fn spawn_idle_watcher(mountpoint: PathBuf, last_activity: Arc<AtomicU64>, timeou
             );
             let _ = run_unmount(&mountpoint);
             return;
+        }
+    });
+}
+
+// Runs VACUUM once the mount has been idle for `threshold`, but only if
+// there's a meaningful amount of freed-but-unreclaimed space to actually
+// get back - most idle periods have nothing worth reclaiming (freed space
+// is already being reused for future writes), so checking first avoids a
+// pointless full-file rewrite. Uses the same connection/lock the FUSE loop
+// itself uses, so it's automatically serialized with any live filesystem
+// activity - safe, but a filesystem call that arrives mid-VACUUM will block
+// until it finishes, same as any other write contending for that lock.
+// Keeps running (doesn't exit after firing once), so a later idle period
+// can reclaim space freed by deletions that happened since the last run.
+fn spawn_compact_on_idle_watcher(
+    con: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    last_activity: Arc<AtomicU64>,
+    container_path: PathBuf,
+    threshold: Duration,
+) {
+    const MIN_RECLAIM_BYTES: u64 = 64 * 1024 * 1024;
+    const MIN_RECLAIM_FRACTION: f64 = 0.10;
+    let poll = threshold.min(Duration::from_secs(30)).max(Duration::from_secs(1));
+    std::thread::spawn(move || loop {
+        std::thread::sleep(poll);
+        let idle_for = db::now_secs() - last_activity.load(Ordering::Relaxed) as f64;
+        if idle_for < threshold.as_secs_f64() {
+            continue;
+        }
+        let Ok(on_disk) = std::fs::metadata(&container_path).map(|m| m.len()) else {
+            continue;
+        };
+        let guard = con.lock().unwrap();
+        let used: i64 = guard
+            .query_row("SELECT COALESCE(SUM(size),0) FROM inodes", [], |r| r.get(0))
+            .unwrap_or(0);
+        let gap = on_disk.saturating_sub(used as u64);
+        if gap < MIN_RECLAIM_BYTES || (gap as f64) < on_disk as f64 * MIN_RECLAIM_FRACTION {
+            continue;
+        }
+        eprintln!(
+            "coffer: idle with ~{gap} reclaimable bytes, compacting {}...",
+            container_path.display()
+        );
+        // VACUUM alone doesn't shrink the main file under WAL mode - it
+        // lands in the WAL first. A normal (non-idle-watcher) connection
+        // gets this for free from SQLite's checkpoint-on-last-close, but
+        // this connection stays open for the mount's whole lifetime, so the
+        // checkpoint has to be forced explicitly or the main file's size on
+        // disk never actually changes.
+        if let Err(e) = guard.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);") {
+            eprintln!("coffer: auto-compact failed: {e}");
         }
     });
 }
@@ -480,7 +546,13 @@ fn cmd_compact(file: &Path, password_file: Option<&Path>) -> Result<()> {
         "coffer: compacting {} (VACUUM may need up to ~2x the current size in free disk space temporarily)...",
         file.display()
     );
-    con.execute_batch("VACUUM")?;
+    // Explicit checkpoint rather than relying on SQLite's checkpoint-on-
+    // last-close for a WAL-mode database: correct either way here since
+    // this connection does close right after, but relying on that implicit
+    // behavior bit the idle-watcher's long-lived connection (see there), so
+    // making it explicit here too rather than depending on two different
+    // mechanisms to reach the same result.
+    con.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
     drop(con);
     let after = std::fs::metadata(file)?.len();
     println!(
@@ -502,8 +574,15 @@ fn main() -> Result<()> {
         Cmd::Create { file, max_size, password_file } => {
             cmd_create(&file, max_size, password_file.as_deref())
         }
-        Cmd::Mount { file, mountpoint, foreground, idle_timeout, password_file } => {
-            cmd_mount(&file, &mountpoint, foreground, idle_timeout, password_file.as_deref())
+        Cmd::Mount { file, mountpoint, foreground, idle_timeout, compact_on_idle, password_file } => {
+            cmd_mount(
+                &file,
+                &mountpoint,
+                foreground,
+                idle_timeout,
+                compact_on_idle,
+                password_file.as_deref(),
+            )
         }
         Cmd::Umount { mountpoint } => cmd_umount(&mountpoint),
         Cmd::Check { file, password_file } => cmd_check(&file, password_file.as_deref()),

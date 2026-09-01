@@ -26,7 +26,7 @@ struct InodeRow {
 }
 
 pub struct CofferFS {
-    con: Mutex<Connection>,
+    con: Arc<Mutex<Connection>>,
     max_size: u64,
     uid: u32,
     gid: u32,
@@ -37,7 +37,7 @@ pub struct CofferFS {
 impl CofferFS {
     pub fn new(con: Connection, max_size: u64, container_path: &Path) -> Self {
         CofferFS {
-            con: Mutex::new(con),
+            con: Arc::new(Mutex::new(con)),
             max_size,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
@@ -54,6 +54,13 @@ impl CofferFS {
     /// loop; every handled call below refreshes it via `touch()`.
     pub fn last_activity(&self) -> Arc<AtomicU64> {
         self.last_activity.clone()
+    }
+
+    /// Shared handle for an out-of-band idle-compact watcher to run VACUUM
+    /// on - the same connection/lock the FUSE loop itself uses, so it's
+    /// automatically serialized with any live filesystem activity.
+    pub fn connection_handle(&self) -> Arc<Mutex<Connection>> {
+        self.con.clone()
     }
 
     fn touch(&self) {
