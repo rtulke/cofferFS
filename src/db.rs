@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
@@ -175,7 +175,16 @@ pub fn now_secs() -> f64 {
 /// including on a crash or kill -9 - so there's no stale-lock case to
 /// handle, unlike a PID file.
 pub fn lock_exclusive(path: &Path) -> Result<File> {
-    let f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    // Opened read-write, not read-only: local filesystems' flock() ignores
+    // the fd's open mode, but on NFS the kernel emulates flock() via
+    // byte-range locks and rejects LOCK_EX on a read-only fd with EBADF.
+    // All three callers (mount/passwd/compact) already need write access to
+    // the container right after this anyway, so this costs nothing locally.
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
     let ret = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
