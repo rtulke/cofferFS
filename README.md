@@ -244,12 +244,17 @@ that long, it checks for a meaningful gap (at least 64MB *and* at least
 nothing worth reclaiming, so it stays a no-op most of the time rather than
 rewriting the file on every idle tick. It keeps running afterward (unlike
 `--idle-timeout`, which unmounts and stops), so a later deletion can be
-reclaimed on a future idle period too. One real caveat: it shares the same
-connection/lock the FUSE loop uses, so if a filesystem call arrives while
-a `VACUUM` happens to be mid-run, that call blocks until it finishes -
-same as any other write contending for that lock, just less predictable
-than choosing to run `coffer compact` yourself while you're not using the
-mount.
+reclaimed on a future idle period too. One real caveat, and it's bigger
+than it sounds: `fuser` dispatches FUSE requests from a single thread by
+default, so a `VACUUM` mid-run doesn't just block the next *write* - it
+blocks *everything* (`ls`, `stat`, opening a file, all of it) for as long
+as it takes, on a large container potentially minutes. It re-checks
+right before starting that the mount is still idle (in case activity
+resumed in the moment between deciding to compact and actually acquiring
+the lock), which narrows but can't fully close that window. If that
+tradeoff doesn't sit right for a container you use interactively, prefer
+running `coffer compact` yourself while you're not using the mount instead
+of `--compact-on-idle`.
 
 ## Design notes
 
@@ -283,7 +288,16 @@ mount.
   released by the kernel the instant every fd on it closes - including on a
   crash or `kill -9` - so unlike a PID file there's no stale-lock case to
   clean up; verified by killing a mount mid-session and confirming `passwd`
-  could immediately acquire the lock right after.
+  could immediately acquire the lock right after. `mount` acquires this
+  lock before it even opens the database (not just before daemonizing) -
+  otherwise a concurrent `passwd` could rekey the container in the window
+  between `mount` opening its connection and taking the lock, leaving
+  `mount` serving with a stale key against a file now encrypted under a
+  different one. This lock is only ever as reliable as `flock()` is on
+  whatever filesystem the container lives on - solid locally, but
+  historically inconsistent over NFS depending on version/lockd config, so
+  don't rely on it as a hard guarantee for a container shared over NFS from
+  multiple machines.
 - Rust was chosen over C for the compiler's memory safety (removes an
   entire class of leak/use-after-free/buffer-overflow bugs in the block-
   storage code - not a risk worth taking for a tool whose whole point is

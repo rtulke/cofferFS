@@ -102,7 +102,11 @@ writers.
 deliberately do not lock: WAL mode already gives them a safe, consistent
 view alongside an active writer, which
 .B backup
-in particular depends on.
+in particular depends on. This lock is only as reliable as
+.BR flock (2)
+is on the underlying filesystem \- solid locally, but historically
+inconsistent over NFS \- so it should not be relied on as a hard guarantee
+for a container shared over NFS from multiple machines.
 .SH COMMANDS
 .TP
 .BI "create " file " [\-\-max\-size " SIZE ]
@@ -157,8 +161,16 @@ amount of reclaimable space (at least 64\ MB and at least 10% of the file);
 most idle periods reclaim nothing, so this is normally a no\-op. Unlike
 .BR \-\-idle\-timeout ,
 it keeps running afterward instead of unmounting. It shares the same
-connection the FUSE loop itself uses, so a filesystem call that arrives
-mid\-VACUUM blocks until it finishes. Off by default.
+connection the FUSE loop itself uses, and
+.B coffer
+dispatches FUSE requests from a single thread by default, so a
+mid\-VACUUM
+.B every
+filesystem call blocks \- not just writes \- until it finishes, which on a
+large container can be minutes. Off by default; prefer running
+.B compact
+manually while the mount is idle instead, for containers used
+interactively.
 .TP
 .BI "umount " mountpoint
 Unmount a container previously mounted at

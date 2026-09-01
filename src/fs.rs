@@ -13,6 +13,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(1);
 
+// The `size` column is SQLite INTEGER (signed 64-bit); a length beyond this
+// would wrap to negative when persisted. Nowhere near any real disk or
+// legitimate offset, but pwrite()/ftruncate() let a caller pass an
+// arbitrary offset, so this is enforced explicitly rather than left to
+// silently wrap (release builds don't panic on overflow - see Cargo.toml).
+const MAX_FILE_SIZE: u64 = i64::MAX as u64;
+
 struct InodeRow {
     kind: i64,
     mode: i64,
@@ -222,6 +229,21 @@ fn to_attr(ino: u64, row: &InodeRow) -> FileAttr {
     }
 }
 
+// Every DB error elsewhere in this file collapses to EIO, which is fine for
+// operations that only ever touch a row or two of metadata. write()/create()
+// are the paths that can plausibly move enough data to hit a genuinely full
+// host disk (relevant when --max-size is unset, i.e. "grows until host disk
+// is full") - callers/tools checking for ENOSPC specifically (cp, GUI file
+// managers) deserve the real errno there instead of a generic I/O error.
+fn errno_for(e: &rusqlite::Error) -> Errno {
+    if let rusqlite::Error::SqliteFailure(inner, _) = e {
+        if inner.code == rusqlite::ErrorCode::DiskFull {
+            return Errno::ENOSPC;
+        }
+    }
+    Errno::EIO
+}
+
 // --- the actual FUSE filesystem --------------------------------------------
 
 impl Filesystem for CofferFS {
@@ -310,6 +332,22 @@ impl Filesystem for CofferFS {
                 .is_ok();
         }
         if let Some(new_len) = size {
+            if new_len > MAX_FILE_SIZE {
+                reply.error(Errno::EFBIG);
+                return;
+            }
+            // Growing via truncate/ftruncate (e.g. pre-allocating a sparse
+            // file) needs the same ceiling check write() does - otherwise
+            // `--max-size` is trivially bypassed with a single ftruncate to
+            // a huge length, no actual data required.
+            if self.max_size != 0 && new_len > row.size {
+                if let Ok(used) = current_total_size(&tx) {
+                    if used + (new_len - row.size) > self.max_size {
+                        reply.error(Errno::ENOSPC);
+                        return;
+                    }
+                }
+            }
             ok &= truncate_inode(&tx, ino.0, new_len).is_ok();
         }
         if atime.is_some() || mtime.is_some() {
@@ -518,6 +556,14 @@ impl Filesystem for CofferFS {
             reply.error(Errno::EEXIST);
             return;
         }
+        if self.max_size != 0 {
+            if let Ok(used) = current_total_size(&tx) {
+                if used + target_str.len() as u64 > self.max_size {
+                    reply.error(Errno::ENOSPC);
+                    return;
+                }
+            }
+        }
         let mode = (libc::S_IFLNK | 0o777) as i64;
         let new_ino = match insert_child(&tx, parent.0, name, KIND_SYMLINK, mode, self.uid, self.gid, Some(target_str)) {
             Ok(i) => i,
@@ -646,13 +692,13 @@ impl Filesystem for CofferFS {
         let file_mode = (libc::S_IFREG | (mode & 0o7777)) as i64;
         let new_ino = match insert_child(&tx, parent.0, name, KIND_FILE, file_mode, self.uid, self.gid, None) {
             Ok(i) => i,
-            Err(_) => {
-                reply.error(Errno::EIO);
+            Err(e) => {
+                reply.error(errno_for(&e));
                 return;
             }
         };
-        if tx.commit().is_err() {
-            reply.error(Errno::EIO);
+        if let Err(e) = tx.commit() {
+            reply.error(errno_for(&e));
             return;
         }
         match row_by_ino(&con, new_ino) {
@@ -733,6 +779,10 @@ impl Filesystem for CofferFS {
         reply: ReplyWrite,
     ) {
         self.touch();
+        if offset > MAX_FILE_SIZE || data.len() as u64 > MAX_FILE_SIZE - offset {
+            reply.error(Errno::EFBIG);
+            return;
+        }
         let ino = fh.0;
         let mut con = self.con.lock().unwrap();
         let tx = match con.transaction() {
@@ -781,8 +831,8 @@ impl Filesystem for CofferFS {
                 buf.resize(need_len, 0);
             }
             buf[block_off..block_off + chunk.len()].copy_from_slice(chunk);
-            if put_block(&tx, ino, block_no, &buf).is_err() {
-                reply.error(Errno::EIO);
+            if let Err(e) = put_block(&tx, ino, block_no, &buf) {
+                reply.error(errno_for(&e));
                 return;
             }
             pos += take as u64;
@@ -790,12 +840,15 @@ impl Filesystem for CofferFS {
         }
         let new_size = std::cmp::max(old_size, offset + data.len() as u64);
         let now = db::now_secs();
-        let ok = tx
+        let update_result = tx
             .prepare_cached("UPDATE inodes SET size=?1, mtime=?2, ctime=?2 WHERE ino=?3")
-            .and_then(|mut s| s.execute(params![new_size as i64, now, ino as i64]))
-            .is_ok();
-        if !ok || tx.commit().is_err() {
-            reply.error(Errno::EIO);
+            .and_then(|mut s| s.execute(params![new_size as i64, now, ino as i64]));
+        if let Err(e) = update_result {
+            reply.error(errno_for(&e));
+            return;
+        }
+        if let Err(e) = tx.commit() {
+            reply.error(errno_for(&e));
             return;
         }
         reply.written(data.len() as u32);
