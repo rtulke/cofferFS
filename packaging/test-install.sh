@@ -38,6 +38,7 @@ for id in "${!TARGET_IMAGES[@]}"; do
             apt-get install -y --no-install-recommends /tmp/coffer.deb
 
             coffer --help
+            test -f /usr/share/bash-completion/completions/coffer
 
             mkdir -p /root/mnt
             printf "testpass\ntestpass\n" | coffer create /root/vault.coffer

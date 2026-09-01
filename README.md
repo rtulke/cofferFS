@@ -161,8 +161,11 @@ coffer compact vault.coffer      # VACUUM - reclaim space after deletions; refus
 # normally prompts accepts this instead)
 coffer mount vault.coffer ~/vault --password-file ~/.coffer-pw
 
-# Shell completions
-coffer completions bash > /etc/bash_completion.d/coffer
+# Shell completions (bash/zsh/fish) - installed automatically by the .deb
+# package and by `sudo make install`; only needed manually for a
+# PREFIX=$HOME/.local source install, where the standard system completion
+# directories aren't on the search path:
+coffer completions bash > ~/.local/share/bash-completion/completions/coffer
 ```
 
 ## NFS home directories

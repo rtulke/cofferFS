@@ -65,6 +65,12 @@ jobs:
       - name: Build man page
         run: make man
 
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build shell completions
+        run: make completions
+
       - name: Build .deb
         run: cargo deb
 
@@ -132,6 +138,7 @@ jobs:
             bash -euxc '
               apt-get update -qq
               DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /work/coffer_*.deb
+              test -f /usr/share/bash-completion/completions/coffer
 
               mkdir -p /root/mnt
               printf "testpass\ntestpass\n" | coffer create /root/vault.coffer
