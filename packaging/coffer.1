@@ -2,6 +2,9 @@
 .SH NAME
 coffer \- growable, user-mountable encrypted single-file containers
 .SH SYNOPSIS
+.B coffer
+.RB [ \-\-version ]
+.br
 .B coffer create
 .I file
 .RB [ \-\-max\-size
@@ -60,6 +63,10 @@ mount without root or sudo. Directories and files are rows in a
 Mounting is done via
 .BR FUSE (4),
 so a mount is owned by, and only accessible to, the user who created it.
+.B coffer \-\-version
+prints the package version together with the exact git commit it was
+built from, so two installations claiming the same version number can
+still be told apart.
 .PP
 The container has no fixed size: SQLite simply extends the backing file
 as data is written, unless a ceiling is set at creation time with

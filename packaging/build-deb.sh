@@ -43,7 +43,7 @@ for id in "${TARGET_IDS[@]}"; do
         bash -euxc '
             apt-get update -qq
             apt-get install -y --no-install-recommends \
-                build-essential pkg-config perl libfuse3-dev curl ca-certificates
+                build-essential pkg-config perl libfuse3-dev curl ca-certificates git
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
                 sh -s -- -y --default-toolchain stable --profile minimal
             source "$HOME/.cargo/env"

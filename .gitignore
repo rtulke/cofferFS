@@ -13,7 +13,9 @@ dist/
 build.log
 
 # Python reference implementation: kept locally, not published to GitHub -
-# only the Rust port (now at the repo root) is tracked and released.
-/coffer
+# only the Rust port (now at the repo root) is tracked and released. Named
+# distinctly (not just "coffer") so it can never shadow/be confused with
+# the actual target/release/coffer or installed binary at the repo root.
+/coffer-reference.py
 /requirements.txt
 /setup-python.sh
