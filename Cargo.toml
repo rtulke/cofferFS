@@ -43,4 +43,7 @@ assets = [
     ["target/release/coffer", "usr/bin/", "755"],
     ["target/man/coffer.1.gz", "usr/share/man/man1/coffer.1.gz", "644"],
     ["README.md", "usr/share/doc/coffer/README.md", "644"],
+    ["target/completions/coffer.bash", "usr/share/bash-completion/completions/coffer", "644"],
+    ["target/completions/_coffer", "usr/share/zsh/site-functions/_coffer", "644"],
+    ["target/completions/coffer.fish", "usr/share/fish/vendor_completions.d/coffer.fish", "644"],
 ]

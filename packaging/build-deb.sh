@@ -49,6 +49,8 @@ for id in "${TARGET_IDS[@]}"; do
             source "$HOME/.cargo/env"
             cargo install cargo-deb --locked --version 3.7.0
             make man
+            cargo build --release
+            make completions
             cargo deb
         '
     SRC_DEB=$(ls "target-$id/debian/"*.deb | head -1)

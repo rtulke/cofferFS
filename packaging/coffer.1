@@ -237,7 +237,12 @@ is mounted.
 Print a shell completion script for
 .I shell
 .RI ( bash ", " zsh ", " fish ", " elvish ", or " powershell )
-to stdout.
+to stdout. bash/zsh/fish completions are installed automatically by this
+package and by
+.BR "make install" ;
+this is only needed manually for a
+.B "PREFIX=$HOME/.local"
+source install.
 .SH EXIT STATUS
 .B 0
 on success.
