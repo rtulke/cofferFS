@@ -10,7 +10,10 @@ use std::time::Duration;
 
 /// coffer - growable encrypted containers, mountable as a normal user.
 #[derive(Parser)]
-#[command(name = "coffer")]
+#[command(
+    name = "coffer",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("COFFER_GIT_HASH"), ")")
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

@@ -13,6 +13,10 @@ cp -r ~/Documents/secret-stuff ~/vault/
 coffer umount ~/vault
 ```
 
+`coffer --version` prints the package version *and* the exact git commit
+it was built from, so two installs claiming the same version number can
+still be told apart.
+
 ## Install
 
 **Prebuilt `.deb`** — one package per target distro (Debian 12/13, Ubuntu
