@@ -6,27 +6,49 @@ coffer \- growable, user-mountable encrypted single-file containers
 .I file
 .RB [ \-\-max\-size
 .IR SIZE ]
+.RB [ \-\-password\-file
+.IR FILE ]
 .br
 .B coffer mount
 .I file mountpoint
 .RB [ \-\-foreground ]
 .RB [ \-\-idle\-timeout
 .IR DURATION ]
+.RB [ \-\-password\-file
+.IR FILE ]
 .br
 .B coffer umount
 .I mountpoint
 .br
 .B coffer check
 .I file
+.RB [ \-\-password\-file
+.IR FILE ]
 .br
 .B coffer backup
 .I file dest
+.RB [ \-\-password\-file
+.IR FILE ]
 .br
 .B coffer passwd
 .I file
+.RB [ \-\-password\-file
+.IR FILE ]
+.RB [ \-\-new\-password\-file
+.IR FILE ]
 .br
 .B coffer info
 .I file
+.RB [ \-\-password\-file
+.IR FILE ]
+.br
+.B coffer compact
+.I file
+.RB [ \-\-password\-file
+.IR FILE ]
+.br
+.B coffer completions
+.I shell
 .SH DESCRIPTION
 .B coffer
 creates a single-file encrypted container that any user can create and
@@ -54,7 +76,24 @@ use), the password is instead read as a single plain-text line from
 stdin. The password is never accepted as a command-line argument, so it
 cannot leak via
 .BR ps (1)
-output or shell history.
+output or shell history. Every such command also accepts
+.B \-\-password\-file
+.I FILE
+as an explicit alternative to prompting \- reads one line from
+.IR FILE ,
+useful for cron jobs and systemd units. A world\- or group\-readable
+password file prints a warning but is not refused outright.
+.PP
+.BR mount ", " passwd ", and " compact
+take an exclusive lock on the container before doing anything else, so at
+most one of them can run against a given container at a time \- attempting
+a second one fails immediately with a clear error rather than racing two
+writers.
+.BR check ", " backup ", and " info
+deliberately do not lock: WAL mode already gives them a safe, consistent
+view alongside an active writer, which
+.B backup
+in particular depends on.
 .SH COMMANDS
 .TP
 .BI "create " file " [\-\-max\-size " SIZE ]
@@ -68,7 +107,10 @@ is a plain byte count or a number suffixed with
 .BR K / M / G / T ,
 e.g.
 .BR 10G )
-to reject writes past a fixed ceiling with ENOSPC instead.
+to reject writes past a fixed ceiling with ENOSPC instead. With
+.BR \-\-password\-file ,
+the password is read once from the given file instead of prompted for
+twice.
 .TP
 .BI "mount " file " " mountpoint " [\-\-foreground] [\-\-idle\-timeout " DURATION ]
 Mount
@@ -90,7 +132,13 @@ is a plain second count or a number suffixed with
 e.g.
 .BR 30m )
 auto\-unmounts the container after it has seen no filesystem activity for
-that long. Off by default.
+that long. Off by default. Refuses to run if
+.I file
+is already mounted (or a
+.B passwd
+/
+.B compact
+is in progress against it).
 .TP
 .BI "umount " mountpoint
 Unmount a container previously mounted at
@@ -113,7 +161,10 @@ HMAC check followed by SQLite's structural
 .B integrity_check
 (authoritative for containers past 4\ GB \- see
 .B BUGS
-below). Exits non-zero if either check finds a real problem.
+below). Exits non-zero if either check finds a real problem. Safe to run
+while
+.I file
+is mounted.
 .TP
 .BI "backup " file " " dest
 Write a byte-consistent copy of
@@ -126,11 +177,35 @@ is mounted and being actively written to.
 .TP
 .BI "passwd " file
 Change the container password. Prompts for the current password, then
-the new password twice (with confirmation).
+the new password twice (with confirmation), unless
+.B \-\-password\-file
+/
+.B \-\-new\-password\-file
+are given. Refuses to run while
+.I file
+is mounted.
 .TP
 .BI "info " file
 Print on-disk size, logical data used, the configured size ceiling (if
-any), and directory/file/symlink counts.
+any), and directory/file/symlink counts. Safe to run while
+.I file
+is mounted.
+.TP
+.BI "compact " file
+Run
+.B VACUUM
+against the container to reclaim disk space freed by earlier deletions
+(SQLite does not shrink the file on its own). May temporarily need up to
+roughly twice the container's current size in free disk space while it
+runs. Refuses to run while
+.I file
+is mounted.
+.TP
+.BI "completions " shell
+Print a shell completion script for
+.I shell
+.RI ( bash ", " zsh ", " fish ", " elvish ", or " powershell )
+to stdout.
 .SH EXIT STATUS
 .B 0
 on success.
