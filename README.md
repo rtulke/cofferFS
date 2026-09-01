@@ -143,6 +143,9 @@ coffer umount ~/vault
 # Auto-unmount after being idle for a while (no fixed default - opt in)
 coffer mount  vault.coffer ~/vault --idle-timeout 30m
 
+# Auto-compact after being idle, but only if there's real space to reclaim
+coffer mount  vault.coffer ~/vault --compact-on-idle 1h
+
 # Maintenance
 coffer info    vault.coffer      # file/dir counts, size on disk vs. logical data
 coffer check   vault.coffer      # read-only integrity check (HMAC + structural)
@@ -229,6 +232,20 @@ roughly twice the container's current size in free disk space while it
 runs (temporary, that's just how `VACUUM` works), and refuses to run
 against a mounted container - same reasoning as `passwd`, see **Design
 notes** below.
+
+If you'd rather not think about it at all, `coffer mount --compact-on-idle
+1h` does this automatically while mounted: once the mount has been idle
+that long, it checks for a meaningful gap (at least 64MB *and* at least
+10% of the file) and only then runs `VACUUM` - most idle periods have
+nothing worth reclaiming, so it stays a no-op most of the time rather than
+rewriting the file on every idle tick. It keeps running afterward (unlike
+`--idle-timeout`, which unmounts and stops), so a later deletion can be
+reclaimed on a future idle period too. One real caveat: it shares the same
+connection/lock the FUSE loop uses, so if a filesystem call arrives while
+a `VACUUM` happens to be mid-run, that call blocks until it finishes -
+same as any other write contending for that lock, just less predictable
+than choosing to run `coffer compact` yourself while you're not using the
+mount.
 
 ## Design notes
 

@@ -14,6 +14,8 @@ coffer \- growable, user-mountable encrypted single-file containers
 .RB [ \-\-foreground ]
 .RB [ \-\-idle\-timeout
 .IR DURATION ]
+.RB [ \-\-compact\-on\-idle
+.IR DURATION ]
 .RB [ \-\-password\-file
 .IR FILE ]
 .br
@@ -112,7 +114,7 @@ to reject writes past a fixed ceiling with ENOSPC instead. With
 the password is read once from the given file instead of prompted for
 twice.
 .TP
-.BI "mount " file " " mountpoint " [\-\-foreground] [\-\-idle\-timeout " DURATION ]
+.BI "mount " file " " mountpoint " [\-\-foreground] [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION ]
 Mount
 .I file
 at
@@ -139,6 +141,17 @@ is already mounted (or a
 /
 .B compact
 is in progress against it).
+.B \-\-compact\-on\-idle
+.RI ( DURATION
+in the same format) periodically runs
+.B VACUUM
+once the mount has been idle that long, but only if there is a meaningful
+amount of reclaimable space (at least 64\ MB and at least 10% of the file);
+most idle periods reclaim nothing, so this is normally a no\-op. Unlike
+.BR \-\-idle\-timeout ,
+it keeps running afterward instead of unmounting. It shares the same
+connection the FUSE loop itself uses, so a filesystem call that arrives
+mid\-VACUUM blocks until it finishes. Off by default.
 .TP
 .BI "umount " mountpoint
 Unmount a container previously mounted at
