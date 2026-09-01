@@ -144,10 +144,18 @@ coffer umount ~/vault
 coffer mount  vault.coffer ~/vault --idle-timeout 30m
 
 # Maintenance
-coffer info   vault.coffer      # file/dir counts, size on disk vs. logical data
-coffer check  vault.coffer      # read-only integrity check (HMAC + structural)
-coffer backup vault.coffer vault.bak.coffer   # consistent copy, safe while mounted
-coffer passwd vault.coffer      # change the password
+coffer info    vault.coffer      # file/dir counts, size on disk vs. logical data
+coffer check   vault.coffer      # read-only integrity check (HMAC + structural)
+coffer backup  vault.coffer vault.bak.coffer   # consistent copy, safe while mounted
+coffer passwd  vault.coffer      # change the password
+coffer compact vault.coffer      # VACUUM - reclaim space after deletions; refuses while mounted
+
+# Non-interactive auth for scripts/cron/systemd units (any command that
+# normally prompts accepts this instead)
+coffer mount vault.coffer ~/vault --password-file ~/.coffer-pw
+
+# Shell completions
+coffer completions bash > /etc/bash_completion.d/coffer
 ```
 
 ## NFS home directories
@@ -212,7 +220,22 @@ periodically scanning the mount will keep resetting the timer).
   own error output is suppressed so a routine escalation doesn't look like a
   failure; only a genuine final failure prints anything.
 - Password prompts mask input on a real terminal; if stdin isn't a TTY
-  (piping, scripting), it falls back to a visible plain-text read.
+  (piping, scripting), it falls back to a visible plain-text read. Every
+  command that takes a password also accepts `--password-file <path>` as an
+  explicit alternative - mainly so the password never has to appear as a
+  process argument or get piped through a `printf`/`echo` that's briefly
+  visible in `ps`. A world/group-readable password file prints a warning
+  (not a hard failure).
+- `mount`, `passwd`, and `compact` take an exclusive `flock()` on the
+  container file before doing anything else, so two of them can never run
+  against the same container at once - the actual risk this project cares
+  about (two live writers). `check`, `backup`, and `info` deliberately don't
+  lock: WAL mode already gives them a safe, consistent view alongside an
+  active writer, which `backup` in particular depends on. The lock is
+  released by the kernel the instant every fd on it closes - including on a
+  crash or `kill -9` - so unlike a PID file there's no stale-lock case to
+  clean up; verified by killing a mount mid-session and confirming `passwd`
+  could immediately acquire the lock right after.
 - Rust was chosen over C for the compiler's memory safety (removes an
   entire class of leak/use-after-free/buffer-overflow bugs in the block-
   storage code - not a risk worth taking for a tool whose whole point is
@@ -298,7 +321,9 @@ copy.
 
 - **Single mounter at a time.** The FUSE loop is intentionally
   single-threaded to keep the SQLite access pattern simple and correct.
-  Don't mount the same container twice concurrently.
+  Mounting (or running `passwd`/`compact` against) an already-in-use
+  container is rejected outright with a clear error - see the locking
+  bullet in **Design notes** - rather than silently racing two writers.
 - **No `default_permissions` enforcement.** Whoever can supply the
   password gets full read/write access to everything inside; Unix
   permission bits are stored and reported but not enforced. This matches
@@ -308,11 +333,12 @@ copy.
   go through per-128KiB-block SQL statements. Great for documents, photos,
   typical file collections; you would want a different design (e.g. a
   dedicated blob store) if you're routinely storing many multi-GB files.
-- **No shrink/compaction command yet.** Deleting files frees rows inside
-  the database but the container file itself doesn't shrink automatically
-  (SQLite reuses that freed space for future writes though). Run `VACUUM`
-  via the `sqlcipher` command-line shell manually if you need to reclaim
-  disk space after large deletions, or add a `coffer compact` subcommand.
+- **Deleted space isn't reclaimed automatically.** Deleting files frees
+  rows inside the database but the container file itself doesn't shrink on
+  its own (SQLite reuses that freed space for future writes though). Run
+  `coffer compact` after large deletions if you want the file itself
+  smaller - it refuses to run against a mounted container, same as
+  `passwd`.
 - **`cipher_integrity_check` false positives past 4GB.** See above -
   `coffer check` already works around this, but be aware if you ever run
   the raw `PRAGMA cipher_integrity_check` yourself against a large

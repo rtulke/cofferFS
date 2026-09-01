@@ -24,6 +24,9 @@ enum Cmd {
         /// Optional ceiling, e.g. 10G (default: unlimited, grows until host disk is full)
         #[arg(long)]
         max_size: Option<String>,
+        /// Read the password from this file instead of prompting
+        #[arg(long)]
+        password_file: Option<PathBuf>,
     },
     /// Mount a container as the current user
     Mount {
@@ -35,17 +38,56 @@ enum Cmd {
         /// Auto-unmount after this long with no filesystem activity, e.g. 30m, 2h (default: never)
         #[arg(long)]
         idle_timeout: Option<String>,
+        /// Read the password from this file instead of prompting
+        #[arg(long)]
+        password_file: Option<PathBuf>,
     },
     /// Unmount a container
     Umount { mountpoint: PathBuf },
     /// Verify integrity without modifying the container
-    Check { file: PathBuf },
+    Check {
+        file: PathBuf,
+        /// Read the password from this file instead of prompting
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
     /// Make a consistent copy (safe even while mounted)
-    Backup { file: PathBuf, dest: PathBuf },
+    Backup {
+        file: PathBuf,
+        dest: PathBuf,
+        /// Read the password from this file instead of prompting
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
     /// Change the container password
-    Passwd { file: PathBuf },
+    Passwd {
+        file: PathBuf,
+        /// Read the current password from this file instead of prompting
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        /// Read the new password from this file instead of prompting
+        #[arg(long)]
+        new_password_file: Option<PathBuf>,
+    },
     /// Show container stats
-    Info { file: PathBuf },
+    Info {
+        file: PathBuf,
+        /// Read the password from this file instead of prompting
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
+    /// Reclaim disk space after deletions (VACUUM); refuses to run against a mounted container
+    Compact {
+        file: PathBuf,
+        /// Read the password from this file instead of prompting
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
+    /// Print a shell completion script to stdout
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 fn parse_size(s: &str) -> Result<u64> {
@@ -103,9 +145,38 @@ fn read_password(confirm: bool) -> Result<String> {
     Ok(pw)
 }
 
-fn cmd_create(file: &Path, max_size: Option<String>) -> Result<()> {
+/// A password file is its own confirmation (there's nothing to retype
+/// against), so `confirm` only applies to the interactive fallback.
+fn read_password_source(password_file: Option<&Path>, confirm: bool) -> Result<String> {
+    let Some(path) = password_file else {
+        return read_password(confirm);
+    };
+    warn_if_world_readable(path);
+    let content = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let pw = content.trim_end_matches(['\n', '\r']).to_string();
+    if pw.is_empty() {
+        bail!("empty password in {}", path.display());
+    }
+    Ok(pw)
+}
+
+#[cfg(unix)]
+fn warn_if_world_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.permissions().mode() & 0o077 != 0 {
+            eprintln!(
+                "warning: {} is readable by others - consider: chmod 600 {}",
+                path.display(),
+                path.display()
+            );
+        }
+    }
+}
+
+fn cmd_create(file: &Path, max_size: Option<String>, password_file: Option<&Path>) -> Result<()> {
     let max_size = max_size.map(|s| parse_size(&s)).transpose()?.unwrap_or(0);
-    let password = read_password(true)?;
+    let password = read_password_source(password_file, true)?;
     db::create_container(file, &password, max_size)?;
     if max_size > 0 {
         println!("coffer: created {} (grows automatically up to {} bytes)", file.display(), max_size);
@@ -115,9 +186,15 @@ fn cmd_create(file: &Path, max_size: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool, idle_timeout: Option<String>) -> Result<()> {
+fn cmd_mount(
+    file: &Path,
+    mountpoint: &Path,
+    foreground: bool,
+    idle_timeout: Option<String>,
+    password_file: Option<&Path>,
+) -> Result<()> {
     let idle_timeout = idle_timeout.map(|s| parse_duration(&s)).transpose()?;
-    let password = read_password(false)?;
+    let password = read_password_source(password_file, false)?;
     let con = db::open_db(file, &password, false)?;
     let max_size = db::read_max_size(&con);
 
@@ -127,6 +204,12 @@ fn cmd_mount(file: &Path, mountpoint: &Path, foreground: bool, idle_timeout: Opt
     }
     let abs_mountpoint = mountpoint.canonicalize()?;
     let abs_file = file.canonicalize()?;
+
+    // Acquired (and validated) before daemonizing: `mount` normally detaches
+    // from the terminal below, so a lock conflict caught only after that
+    // point would fail silently (stdout/stderr already redirected to
+    // /dev/null) instead of giving the user an immediate, visible error.
+    let _lock = db::lock_exclusive(&abs_file)?;
 
     println!("coffer: mounting {} at {}", file.display(), mountpoint.display());
 
@@ -250,8 +333,8 @@ fn which(name: &str) -> Option<PathBuf> {
     })
 }
 
-fn cmd_check(file: &Path) -> Result<()> {
-    let password = read_password(false)?;
+fn cmd_check(file: &Path, password_file: Option<&Path>) -> Result<()> {
+    let password = read_password_source(password_file, false)?;
     let con = db::open_db(file, &password, true)?;
 
     // SQLCipher's own "PRAGMA cipher_integrity_check" has a confirmed upstream bug
@@ -326,8 +409,8 @@ fn cmd_check(file: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_backup(file: &Path, dest: &Path) -> Result<()> {
-    let password = read_password(false)?;
+fn cmd_backup(file: &Path, dest: &Path, password_file: Option<&Path>) -> Result<()> {
+    let password = read_password_source(password_file, false)?;
     let con = db::open_db(file, &password, true)?;
     let mut dest_con = rusqlite::Connection::open(dest)?;
     dest_con.execute_batch(&db::pragma_key_sql("key", &password))?;
@@ -347,19 +430,24 @@ fn cmd_backup(file: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_passwd(file: &Path) -> Result<()> {
-    println!("Current password:");
-    let old = read_password(false)?;
+fn cmd_passwd(file: &Path, password_file: Option<&Path>, new_password_file: Option<&Path>) -> Result<()> {
+    let _lock = db::lock_exclusive(file)?;
+    if password_file.is_none() {
+        println!("Current password:");
+    }
+    let old = read_password_source(password_file, false)?;
     let con = db::open_db(file, &old, false)?;
-    println!("New password:");
-    let new = read_password(true)?;
+    if new_password_file.is_none() {
+        println!("New password:");
+    }
+    let new = read_password_source(new_password_file, true)?;
     con.execute_batch(&db::pragma_key_sql("rekey", &new))?;
     println!("coffer: password changed.");
     Ok(())
 }
 
-fn cmd_info(file: &Path) -> Result<()> {
-    let password = read_password(false)?;
+fn cmd_info(file: &Path, password_file: Option<&Path>) -> Result<()> {
+    let password = read_password_source(password_file, false)?;
     let con = db::open_db(file, &password, true)?;
     let files: i64 = con.query_row("SELECT COUNT(*) FROM inodes WHERE kind=1", [], |r| r.get(0))?;
     let dirs: i64 = con.query_row("SELECT COUNT(*) FROM inodes WHERE kind=0", [], |r| r.get(0))?;
@@ -383,17 +471,51 @@ fn cmd_info(file: &Path) -> Result<()> {
     Ok(())
 }
 
+fn cmd_compact(file: &Path, password_file: Option<&Path>) -> Result<()> {
+    let _lock = db::lock_exclusive(file)?;
+    let password = read_password_source(password_file, false)?;
+    let before = std::fs::metadata(file)?.len();
+    let con = db::open_db(file, &password, false)?;
+    println!(
+        "coffer: compacting {} (VACUUM may need up to ~2x the current size in free disk space temporarily)...",
+        file.display()
+    );
+    con.execute_batch("VACUUM")?;
+    drop(con);
+    let after = std::fs::metadata(file)?.len();
+    println!(
+        "coffer: {before} -> {after} bytes ({} bytes reclaimed)",
+        before.saturating_sub(after)
+    );
+    Ok(())
+}
+
+fn cmd_completions(shell: clap_complete::Shell) {
+    let mut cmd = <Cli as clap::CommandFactory>::command();
+    let name = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Create { file, max_size } => cmd_create(&file, max_size),
-        Cmd::Mount { file, mountpoint, foreground, idle_timeout } => {
-            cmd_mount(&file, &mountpoint, foreground, idle_timeout)
+        Cmd::Create { file, max_size, password_file } => {
+            cmd_create(&file, max_size, password_file.as_deref())
+        }
+        Cmd::Mount { file, mountpoint, foreground, idle_timeout, password_file } => {
+            cmd_mount(&file, &mountpoint, foreground, idle_timeout, password_file.as_deref())
         }
         Cmd::Umount { mountpoint } => cmd_umount(&mountpoint),
-        Cmd::Check { file } => cmd_check(&file),
-        Cmd::Backup { file, dest } => cmd_backup(&file, &dest),
-        Cmd::Passwd { file } => cmd_passwd(&file),
-        Cmd::Info { file } => cmd_info(&file),
+        Cmd::Check { file, password_file } => cmd_check(&file, password_file.as_deref()),
+        Cmd::Backup { file, dest, password_file } => cmd_backup(&file, &dest, password_file.as_deref()),
+        Cmd::Passwd { file, password_file, new_password_file } => {
+            cmd_passwd(&file, password_file.as_deref(), new_password_file.as_deref())
+        }
+        Cmd::Info { file, password_file } => cmd_info(&file, password_file.as_deref()),
+        Cmd::Compact { file, password_file } => cmd_compact(&file, password_file.as_deref()),
+        Cmd::Completions { shell } => {
+            cmd_completions(shell);
+            Ok(())
+        }
     }
 }

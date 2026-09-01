@@ -1,5 +1,7 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
+use std::fs::File;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 pub const BLOCK_SIZE: i64 = 128 * 1024;
@@ -151,4 +153,33 @@ pub fn now_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64()
+}
+
+/// Exclusive advisory lock guarding the *write-intent* operations (mount,
+/// passwd, compact) against each other - two live writers on the same
+/// container is the actual danger this project cares about. Deliberately
+/// not used by check/backup/info: WAL mode already gives readers a safe,
+/// consistent view alongside an active writer (backup's online-backup API
+/// is documented to rely on exactly that), so locking them out would only
+/// get in the way of something that's already safe.
+///
+/// Held on a separate fd from the one SQLite itself uses (flock() and
+/// SQLite's own fcntl() record locks don't interact), released
+/// automatically by the kernel the moment every fd referencing it closes -
+/// including on a crash or kill -9 - so there's no stale-lock case to
+/// handle, unlike a PID file.
+pub fn lock_exclusive(path: &Path) -> Result<File> {
+    let f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let ret = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            bail!(
+                "{} is already in use by another coffer process (mounted, or a passwd/compact in progress)",
+                path.display()
+            );
+        }
+        return Err(err).context("acquiring lock");
+    }
+    Ok(f)
 }
