@@ -149,10 +149,16 @@ pub fn read_max_size(con: &Connection) -> u64 {
 }
 
 pub fn now_secs() -> f64 {
+    // A clock set before 1970 (dead CMOS battery, broken NTP at boot) would
+    // otherwise panic here - and since this runs on nearly every FUSE call
+    // (touch(), every mtime/ctime update), that's a repeated full-process
+    // abort on every single filesystem operation, not just a one-off. 0.0
+    // is a harmless fallback: it just means timestamps look like the epoch
+    // until the clock is fixed, not a crash.
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64()
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Exclusive advisory lock guarding the *write-intent* operations (mount,

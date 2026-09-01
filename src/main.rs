@@ -107,6 +107,12 @@ fn parse_size(s: &str) -> Result<u64> {
         _ => (s.as_str(), 1u64),
     };
     let value: f64 = num.parse().context("invalid size")?;
+    // A negative value would otherwise saturate to 0 on the cast below -
+    // which this codebase treats as "unlimited", the exact opposite of a
+    // safety ceiling someone typed a negative number for by mistake.
+    if !value.is_finite() || value < 0.0 {
+        bail!("invalid size: {s} (must be a non-negative number)");
+    }
     Ok((value * mult as f64) as u64)
 }
 
@@ -120,7 +126,15 @@ fn parse_duration(s: &str) -> Result<Duration> {
         _ => (s, 1u64),
     };
     let value: f64 = num.parse().context("invalid duration")?;
-    Ok(Duration::from_secs_f64(value * mult as f64))
+    // Duration::from_secs_f64 panics outright on a negative/NaN/infinite
+    // value - which, with this project's `panic = "abort"` release profile,
+    // means a single mistyped flag (e.g. --idle-timeout=-5m) would abort
+    // the whole process instead of producing a normal CLI error.
+    let secs = value * mult as f64;
+    if !secs.is_finite() || secs < 0.0 {
+        bail!("invalid duration: {s} (must be a non-negative number)");
+    }
+    Ok(Duration::from_secs_f64(secs))
 }
 
 /// Prompts on the real TTY when there is one (masked input); falls back to a
@@ -160,7 +174,12 @@ fn read_password_source(password_file: Option<&Path>, confirm: bool) -> Result<S
     };
     warn_if_world_readable(path);
     let content = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let pw = content.trim_end_matches(['\n', '\r']).to_string();
+    // Only the first line, matching read_one()'s stdin-piped fallback
+    // (which reads exactly one line via read_line) - reading the whole file
+    // would silently fold an accidental extra line (a trailing comment, a
+    // stray blank line) into the password instead of just the line the
+    // user actually meant.
+    let pw = content.lines().next().unwrap_or("").to_string();
     if pw.is_empty() {
         bail!("empty password in {}", path.display());
     }
@@ -203,6 +222,16 @@ fn cmd_mount(
 ) -> Result<()> {
     let idle_timeout = idle_timeout.map(|s| parse_duration(&s)).transpose()?;
     let compact_on_idle = compact_on_idle.map(|s| parse_duration(&s)).transpose()?;
+    let abs_file = file.canonicalize()?;
+
+    // Acquired before even opening the database: if some other coffer
+    // process already has this container locked (mounted, or a passwd/
+    // compact in progress), fail immediately - before wasting a password
+    // prompt, and critically before `open_db` below keys a connection that
+    // could otherwise end up stale if a concurrent `passwd` rekeys the
+    // container in the gap between us opening it and us locking it.
+    let _lock = db::lock_exclusive(&abs_file)?;
+
     let password = read_password_source(password_file, false)?;
     let con = db::open_db(file, &password, false)?;
     let max_size = db::read_max_size(&con);
@@ -212,15 +241,33 @@ fn cmd_mount(
         bail!("mountpoint {} is not empty", mountpoint.display());
     }
     let abs_mountpoint = mountpoint.canonicalize()?;
-    let abs_file = file.canonicalize()?;
-
-    // Acquired (and validated) before daemonizing: `mount` normally detaches
-    // from the terminal below, so a lock conflict caught only after that
-    // point would fail silently (stdout/stderr already redirected to
-    // /dev/null) instead of giving the user an immediate, visible error.
-    let _lock = db::lock_exclusive(&abs_file)?;
 
     println!("coffer: mounting {} at {}", file.display(), mountpoint.display());
+
+    let filesystem = fs::CofferFS::new(con, max_size, &abs_file);
+    // Grabbed before `filesystem` is moved into Session::new below - these
+    // are just cloned Arc handles, independent of filesystem's ownership.
+    let last_activity = filesystem.last_activity();
+    let connection_handle = filesystem.connection_handle();
+    let mut config = fuser::Config::default();
+    config.mount_options = vec![
+        fuser::MountOption::FSName("coffer".into()),
+        fuser::MountOption::NoDev,
+        fuser::MountOption::NoSuid,
+    ];
+
+    // Session::new() performs the actual mount(2) and the FUSE handshake
+    // synchronously and returns a Result - deliberately done here, in the
+    // foreground, before any daemonizing. `fuser::mount()` (Session::new +
+    // .run() in one call) would otherwise hide a failure here: `mount`
+    // normally daemonizes right after this point, and daemonize's double-
+    // fork lets the original process exit(0) before the (grand)child has
+    // done anything - so an error surfacing only after that fork would
+    // vanish into the daemon's /dev/null stderr while the calling shell
+    // already saw "success". Splitting it like this means a bad mountpoint,
+    // a permissions race, or any other mount(2)-time failure is reported
+    // normally, synchronously, with a real exit code.
+    let session = fuser::Session::new(filesystem, &abs_mountpoint, &config).context("failed to mount")?;
 
     if !foreground {
         use daemonize::{Daemonize, Stdio};
@@ -232,25 +279,20 @@ fn cmd_mount(
             .context("failed to daemonize")?;
     }
 
-    let filesystem = fs::CofferFS::new(con, max_size, &abs_file);
+    // Spawned only after daemonizing (when applicable): fork() does not
+    // duplicate other threads into the child, only the calling thread - a
+    // watcher thread started before the fork would simply not exist in the
+    // daemonized process. The FUSE session itself survives the fork fine
+    // (it's just an open file descriptor plus ordinary heap data, not a
+    // thread), which is what makes splitting Session::new from .run() safe.
     if let Some(timeout) = idle_timeout {
-        spawn_idle_watcher(abs_mountpoint.clone(), filesystem.last_activity(), timeout);
+        spawn_idle_watcher(abs_mountpoint.clone(), last_activity.clone(), timeout);
     }
     if let Some(threshold) = compact_on_idle {
-        spawn_compact_on_idle_watcher(
-            filesystem.connection_handle(),
-            filesystem.last_activity(),
-            abs_file.clone(),
-            threshold,
-        );
+        spawn_compact_on_idle_watcher(connection_handle, last_activity, abs_file.clone(), threshold);
     }
-    let mut config = fuser::Config::default();
-    config.mount_options = vec![
-        fuser::MountOption::FSName("coffer".into()),
-        fuser::MountOption::NoDev,
-        fuser::MountOption::NoSuid,
-    ];
-    fuser::mount(filesystem, &abs_mountpoint, &config)?;
+
+    session.run()?;
     Ok(())
 }
 
@@ -271,7 +313,15 @@ fn spawn_idle_watcher(mountpoint: PathBuf, last_activity: Arc<AtomicU64>, timeou
                 timeout.as_secs(),
                 mountpoint.display()
             );
-            let _ = run_unmount(&mountpoint);
+            match run_unmount(&mountpoint) {
+                Ok(status) if !status.success() => {
+                    eprintln!("coffer: auto-unmount of {} failed: {status}", mountpoint.display());
+                }
+                Err(e) => {
+                    eprintln!("coffer: auto-unmount of {} failed: {e}", mountpoint.display());
+                }
+                Ok(_) => {}
+            }
             return;
         }
     });
@@ -306,6 +356,16 @@ fn spawn_compact_on_idle_watcher(
             continue;
         };
         let guard = con.lock().unwrap();
+        // Re-check idle_for now that the lock is actually held: activity
+        // could have resumed in the (however brief) gap between the check
+        // above and acquiring this lock, and a VACUUM on a large container
+        // holds fuser's single dispatch thread for its whole duration - so
+        // this is worth re-verifying rather than compacting straight into a
+        // just-resumed session.
+        let idle_for = db::now_secs() - last_activity.load(Ordering::Relaxed) as f64;
+        if idle_for < threshold.as_secs_f64() {
+            continue;
+        }
         let used: i64 = guard
             .query_row("SELECT COALESCE(SUM(size),0) FROM inodes", [], |r| r.get(0))
             .unwrap_or(0);
