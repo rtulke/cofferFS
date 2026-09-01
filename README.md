@@ -203,6 +203,33 @@ Off by default - pass `--idle-timeout` explicitly to opt in. Note that
 something other than you directly (a backup tool or file indexer
 periodically scanning the mount will keep resetting the timer).
 
+## Reclaiming disk space
+
+Deleting files inside a container frees their rows in the underlying
+SQLite database, but the `.coffer` file itself doesn't shrink on its own -
+SQLite just adds that freed space to an internal free-list and reuses it
+for future writes. That's normal SQLite behavior, not a bug, but it means
+the file on disk can stay much bigger than what's actually inside it after
+deleting something large (an old backup, a big video, a subtree you
+cleaned up).
+
+`coffer info` shows both numbers so you can tell if it's worth doing:
+
+```
+On-disk size:      14000000000 bytes
+Logical data used:  2000000000 bytes
+```
+
+A big gap there is what `coffer compact <file>` (a `VACUUM`) reclaims, by
+rewriting the file without the freed space. You'd generally only reach for
+this after a large deletion, not as routine maintenance - day-to-day
+writes reuse that freed space automatically, so compacting a container
+that's just been growing steadily has nothing to gain. It needs up to
+roughly twice the container's current size in free disk space while it
+runs (temporary, that's just how `VACUUM` works), and refuses to run
+against a mounted container - same reasoning as `passwd`, see **Design
+notes** below.
+
 ## Design notes
 
 - Inode numbers are `AUTOINCREMENT` (never reused), avoiding a FUSE
@@ -333,12 +360,9 @@ copy.
   go through per-128KiB-block SQL statements. Great for documents, photos,
   typical file collections; you would want a different design (e.g. a
   dedicated blob store) if you're routinely storing many multi-GB files.
-- **Deleted space isn't reclaimed automatically.** Deleting files frees
-  rows inside the database but the container file itself doesn't shrink on
-  its own (SQLite reuses that freed space for future writes though). Run
-  `coffer compact` after large deletions if you want the file itself
-  smaller - it refuses to run against a mounted container, same as
-  `passwd`.
+- **Deleted space isn't reclaimed automatically.** See **Reclaiming disk
+  space** above - `coffer compact` handles this, but it's an occasional,
+  manual step, not something that happens on its own.
 - **`cipher_integrity_check` false positives past 4GB.** See above -
   `coffer check` already works around this, but be aware if you ever run
   the raw `PRAGMA cipher_integrity_check` yourself against a large
