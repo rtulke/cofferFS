@@ -189,8 +189,14 @@ pub fn lock_exclusive(path: &Path) -> Result<File> {
     if ret != 0 {
         let err = std::io::Error::last_os_error();
         if err.kind() == std::io::ErrorKind::WouldBlock {
+            // On a network filesystem (NFS) this lock is visible across
+            // hosts, so the holder can just as well be a mount left running
+            // on another machine - worth saying, since nothing on *this*
+            // host will show it.
             bail!(
-                "{} is already in use by another coffer process (mounted, or a passwd/compact in progress)",
+                "{} is already in use by another coffer process (mounted, or a passwd/compact in \
+progress). If the container lives on a network filesystem, that process may be running on \
+another host.",
                 path.display()
             );
         }

@@ -21,6 +21,17 @@ sudo apt-get install -y \
     curl \
     ca-certificates
 
+# Make sure the FUSE dev files actually resolve before spending minutes on
+# the build. This is the exact check fuser's build script performs, but its
+# own failure mode is an unhelpful panic buried in cargo output (e.g. when
+# PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR in the environment hide the system .pc
+# files, or on a derivative distro where the package name differs).
+if ! pkg-config --exists 'fuse3 >= 3.0.0'; then
+    echo "error: libfuse3-dev is installed, but pkg-config cannot resolve 'fuse3'." >&2
+    echo "Check PKG_CONFIG_PATH / PKG_CONFIG_LIBDIR in your environment, then re-run ./setup.sh." >&2
+    exit 1
+fi
+
 # SQLCipher and OpenSSL are compiled from source and statically linked in
 # (see Cargo.toml: rusqlite's bundled-sqlcipher-vendored-openssl feature).
 # No libsqlcipher-dev/libssl-dev needed - this also sidesteps a confirmed

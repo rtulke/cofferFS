@@ -182,10 +182,14 @@ Shells out to
 or
 .BR umount (8)
 if unavailable). If the plain unmount fails (e.g. "device or resource
-busy" from a stale connection after a crashed mount daemon), automatically
-retries with a lazy unmount before giving up - no
+busy" from a stale connection after a crashed mount daemon, or another
+process - possibly another user's desktop session - still holding the
+mount), automatically retries with a lazy unmount before giving up - no
 .BR sudo (8)
-needed for this.
+needed for this. After a lazy detach it also aborts the FUSE connection, so
+the mount daemon exits and releases the container's lock right away instead
+of lingering until the last holder lets go; anything that still had files
+open there gets I/O errors from then on.
 .TP
 .BI "check " file
 Verify container integrity without modifying it: SQLCipher's per-page

@@ -389,22 +389,41 @@ fn spawn_compact_on_idle_watcher(
     });
 }
 
-// A plain unmount can fail with "Device or resource busy" when the kernel
-// hasn't finished tearing down a stale FUSE connection yet (e.g. the server
-// process crashed and something still references the mount). Escalating to
-// a lazy unmount - detach the mountpoint now, finish cleanup once nothing
+// A plain unmount can fail with "Device or resource busy" when something
+// still references the mount - a shell cd'd into it, an editor with a file
+// open, or (the sneaky one) a *different* user's desktop session: gvfs/
+// tracker-style daemons watch every mount they can see, and a mountpoint
+// under /tmp is visible to everyone who logs in after you. Escalating to a
+// lazy unmount - detach the mountpoint now, finish cleanup once nothing
 // still references it - resolves that without needing root: it's the same
 // mounting-user permissions as the plain unmount, just a different kernel-
 // side detach mode, so no sudo involved here.
+//
+// The catch with lazy: "once nothing still references it" can be never (a
+// desktop session that stays logged in for days), and until then the coffer
+// daemon keeps running, keeps the container open, and keeps the exclusive
+// lock - which on an NFS home is visible on every other host, so `coffer
+// mount` elsewhere fails with "already in use" while `coffer umount` here
+// reported success. So after a successful lazy detach, the FUSE connection
+// itself is aborted via /sys/fs/fuse/connections/<id>/abort: the kernel
+// fails everything still open on it and the daemon's request loop ends the
+// same way it does on a normal unmount, so it exits cleanly and the lock is
+// released immediately. Whatever was still holding the mount gets I/O
+// errors, which is the honest outcome of an unmount the user asked for.
 fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
+    // Looked up *before* detaching: once the lazy unmount has removed the
+    // mountpoint from the mount table there's no way left to find out which
+    // connection the daemon is sitting on.
+    let connection = fuse_connection_id(mountpoint);
+
     // The plain attempt's own output is suppressed: if it fails it's usually
     // just "device or resource busy" en route to the lazy retry succeeding,
     // and showing that would look like a real error for what's actually a
-    // routine, silent escalation. If the lazy attempt fails too, its output
-    // is left visible - that's a genuine failure worth seeing.
-    for candidate in ["fusermount3", "fusermount"] {
-        if which(candidate).is_some() {
-            let status = std::process::Command::new(candidate)
+    // routine escalation. If the lazy attempt fails too, its output is left
+    // visible - that's a genuine failure worth seeing.
+    let status = match which("fusermount3").or_else(|| which("fusermount")) {
+        Some(fusermount) => {
+            let status = std::process::Command::new(&fusermount)
                 .arg("-u")
                 .arg(mountpoint)
                 .stdout(std::process::Stdio::null())
@@ -413,22 +432,124 @@ fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
             if status.success() {
                 return Ok(status);
             }
-            return std::process::Command::new(candidate)
+            std::process::Command::new(&fusermount)
                 .arg("-u")
                 .arg("-z")
                 .arg(mountpoint)
-                .status();
+                .status()?
+        }
+        None => {
+            let status = std::process::Command::new("umount")
+                .arg(mountpoint)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            if status.success() {
+                return Ok(status);
+            }
+            std::process::Command::new("umount").arg("-l").arg(mountpoint).status()?
+        }
+    };
+    if status.success() {
+        if let Some(id) = connection {
+            abort_fuse_connection(id, mountpoint);
         }
     }
-    let status = std::process::Command::new("umount")
-        .arg(mountpoint)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if status.success() {
-        return Ok(status);
+    Ok(status)
+}
+
+// Kernel id of the FUSE connection behind one of coffer's own mounts, from
+// /proc/self/mountinfo: field 3 is the filesystem's `major:minor`, and the
+// minor is what /sys/fs/fuse/connections/<id> is named after. Deliberately
+// not stat()-based: stat on a FUSE mountpoint is itself a FUSE request,
+// which blocks for good if the daemon behind it is wedged - precisely the
+// situation `umount` gets reached for. For the same reason only the
+// mountpoint's *parent* is canonicalized (symlinks resolved); the last path
+// component is compared by name. Restricted to coffer's own mounts (source
+// "coffer") so `coffer umount` pointed at somebody else's FUSE mount never
+// aborts that.
+fn fuse_connection_id(mountpoint: &Path) -> Option<u32> {
+    let name = mountpoint.file_name()?;
+    let parent = match mountpoint.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let target = parent.canonicalize().ok()?.join(name);
+    let target = target.to_str()?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    // Last match wins: if the path is mounted over more than once, the
+    // entry listed last is the one currently visible there.
+    let mut found = None;
+    for line in mountinfo.lines() {
+        // mount-id parent-id major:minor root mountpoint options [tags] - fstype source superopts
+        let mut fields = line.split(' ');
+        let (Some(_), Some(_), Some(devnum), Some(_), Some(mp)) =
+            (fields.next(), fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let mut tail = match line.split(" - ").nth(1) {
+            Some(rest) => rest.split(' '),
+            None => continue,
+        };
+        let (Some(fstype), Some(source)) = (tail.next(), tail.next()) else {
+            continue;
+        };
+        // libfuse3 registers the mount as type "fuse" with FSName as the
+        // source ("coffer"); only a `subtype=` option would make the type
+        // itself read "fuse.coffer", so accept both spellings.
+        let ours = (fstype == "fuse" || fstype.starts_with("fuse.")) && source == "coffer";
+        if !ours || unescape_mountinfo(mp) != target {
+            continue;
+        }
+        if let Some(minor) = devnum.split(':').nth(1).and_then(|m| m.parse().ok()) {
+            found = Some(minor);
+        }
     }
-    std::process::Command::new("umount").arg("-l").arg(mountpoint).status()
+    found
+}
+
+// mountinfo escapes space, tab, newline and backslash in paths as \040,
+// \011, \012 and \134 (octal), so a mountpoint like "/tmp/my vault" shows up
+// as "/tmp/my\040vault" and has to be decoded before comparing.
+fn unescape_mountinfo(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i + 1..i + 4].iter().all(|b| (b'0'..=b'7').contains(b)) {
+            let code = (bytes[i + 1] - b'0') * 64 + (bytes[i + 2] - b'0') * 8 + (bytes[i + 3] - b'0');
+            out.push(code);
+            i += 4;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn abort_fuse_connection(id: u32, mountpoint: &Path) {
+    let abort = format!("/sys/fs/fuse/connections/{id}/abort");
+    match std::fs::write(&abort, "1") {
+        Ok(()) => eprintln!(
+            "coffer: {} was still in use by another process - detached it and aborted the \
+FUSE connection, so the coffer daemon exits and releases the container now. Anything that \
+still had files open there gets I/O errors from here on.",
+            mountpoint.display()
+        ),
+        // The connection is already gone (daemon crashed and the kernel has
+        // finished tearing it down) - the lazy detach was all that was
+        // needed, nothing to warn about.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!(
+            "coffer: {} was still in use by another process - detached it, but could not abort \
+the FUSE connection ({abort}: {e}). Until whatever holds it lets go, the coffer daemon keeps \
+running and keeps the container locked (also for mounts from other hosts, if it lives on a \
+network filesystem). To force it:\n    echo 1 > {abort}",
+            mountpoint.display()
+        ),
+    }
 }
 
 fn cmd_umount(mountpoint: &Path) -> Result<()> {

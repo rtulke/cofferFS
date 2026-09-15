@@ -275,6 +275,21 @@ of `--compact-on-idle`.
   the mounting user's own permissions, no sudo involved. The plain attempt's
   own error output is suppressed so a routine escalation doesn't look like a
   failure; only a genuine final failure prints anything.
+- A lazy unmount alone only *detaches* the mountpoint; the mount daemon
+  keeps running until the last process referencing the mount lets go - and
+  that can be never: a mountpoint under `/tmp` is visible to everyone, and
+  another user's desktop session (gvfs, file indexers) will happily hold a
+  watch on it for days. Meanwhile the daemon still holds the container's
+  exclusive lock, which on an NFS home is visible on every host - so
+  `coffer mount` elsewhere fails with "already in use" although `umount`
+  reported success. So after a lazy detach of one of its own mounts, `umount`
+  also aborts the FUSE connection (`/sys/fs/fuse/connections/<id>/abort`,
+  owned by the mounting user): the daemon's request loop ends exactly as on a
+  normal unmount, it exits cleanly and the lock is released immediately;
+  whatever still had the mount open gets I/O errors. It prints one line
+  saying so. The connection id is taken from `/proc/self/mountinfo` *before*
+  detaching - deliberately not via `stat()`, which on a FUSE mountpoint is
+  itself a FUSE request and hangs if the daemon is wedged.
 - Password prompts mask input on a real terminal; if stdin isn't a TTY
   (piping, scripting), it falls back to a visible plain-text read. Every
   command that takes a password also accepts `--password-file <path>` as an
