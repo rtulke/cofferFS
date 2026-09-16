@@ -41,7 +41,7 @@ build() {
     cd "cofferFS-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-        export COFFER_GIT_HASH="${_commit:0:7}"
+    export COFFER_GIT_HASH="${_commit:0:7}"
     export GITHUB_SHA="$_commit"
     cargo build --release --frozen
     target/release/coffer completions bash > coffer.bash
