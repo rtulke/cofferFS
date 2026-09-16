@@ -22,7 +22,19 @@ jobs:
       - name: Install test prerequisites
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq fuse3 rsync perl >/dev/null
+          sudo apt-get install -y -qq fuse3 rsync perl attr python3 >/dev/null
+
+      # The newest tagged release, installed as the "previous version" for
+      # the suite's cross-version section: containers must keep opening in
+      # both directions. The runner is Ubuntu 24.04, hence that package.
+      - name: Install the previous release for the compatibility checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo "$GITHUB_REPOSITORY" \
+            --pattern 'coffer_*_ubuntu2404_amd64.deb' --dir /tmp/prev
+          sudo apt-get install -y -qq /tmp/prev/coffer_*.deb >/dev/null
+          /usr/bin/coffer --version
 
       - name: Build
         run: cargo build --release --locked
@@ -31,4 +43,4 @@ jobs:
         run: cargo test --release --locked
 
       - name: Integration suite
-        run: tests/integration.sh
+        run: COFFER_PREV=/usr/bin/coffer tests/integration.sh

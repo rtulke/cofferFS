@@ -272,6 +272,10 @@ full.
 - **Integrity.** SQLCipher HMACs every 4 KiB page; a wrong password fails
   immediately instead of returning garbage. `coffer check` runs both the
   cipher-level and the structural check.
+- **What is stored.** Files, directories, symlinks, permission bits,
+  ownership, timestamps and extended attributes (`user.*` and the rest,
+  up to 64 KiB per value like ext4), so `cp -a`, `rsync -aX` and desktop
+  tagging round-trip. Not hard links, yet.
 - **Limitations.** One mounter at a time. Unix permission bits inside the
   container are stored but not enforced - whoever has the password has
   everything. Fine for documents and photos, not tuned for routinely

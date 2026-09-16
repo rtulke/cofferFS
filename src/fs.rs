@@ -2,7 +2,7 @@ use crate::db::{self, BLOCK_SIZE, KIND_DIR, KIND_FILE, KIND_SYMLINK, ROOT_INO};
 use fuser::{
     Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, ReplyAttr,
     ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, Request, TimeOrNow,
+    ReplyWrite, ReplyXattr, Request, TimeOrNow,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::ffi::OsStr;
@@ -19,6 +19,12 @@ const TTL: Duration = Duration::from_secs(1);
 // arbitrary offset, so this is enforced explicitly rather than left to
 // silently wrap (release builds don't panic on overflow - see Cargo.toml).
 const MAX_FILE_SIZE: u64 = i64::MAX as u64;
+
+// Linux's own limits for extended attributes (XATTR_NAME_MAX, XATTR_SIZE_MAX),
+// so a value that would be refused on ext4 is refused here too, with the
+// same errno, instead of quietly growing the container.
+const XATTR_NAME_MAX: usize = 255;
+const XATTR_SIZE_MAX: usize = 65536;
 
 struct InodeRow {
     kind: i64,
@@ -40,10 +46,15 @@ pub struct CofferFS {
     container_dir: PathBuf,
     last_activity: Arc<AtomicU64>,
     read_only: bool,
+    /// False only for a read-only mount of a container that predates the
+    /// xattrs table (see db::has_xattrs); every xattr call then answers as
+    /// if the file had none.
+    has_xattrs: bool,
 }
 
 impl CofferFS {
     pub fn new(con: Connection, max_size: u64, container_path: &Path, read_only: bool) -> Self {
+        let has_xattrs = db::has_xattrs(&con);
         CofferFS {
             con: Arc::new(Mutex::new(con)),
             max_size,
@@ -56,6 +67,7 @@ impl CofferFS {
                 .to_path_buf(),
             last_activity: Arc::new(AtomicU64::new(db::now_secs() as u64)),
             read_only,
+            has_xattrs,
         }
     }
 
@@ -237,6 +249,19 @@ fn to_attr(ino: u64, row: &InodeRow) -> FileAttr {
 // host disk (relevant when --max-size is unset, i.e. "grows until host disk
 // is full") - callers/tools checking for ENOSPC specifically (cp, GUI file
 // managers) deserve the real errno there instead of a generic I/O error.
+/// The size protocol shared by getxattr and listxattr: with size 0 the
+/// caller only wants to know how big the answer is; otherwise the answer
+/// must fit or it's ERANGE.
+fn reply_xattr(reply: ReplyXattr, size: u32, data: &[u8]) {
+    if size == 0 {
+        reply.size(data.len() as u32);
+    } else if data.len() > size as usize {
+        reply.error(Errno::ERANGE);
+    } else {
+        reply.data(data);
+    }
+}
+
 fn errno_for(e: &rusqlite::Error) -> Errno {
     if let rusqlite::Error::SqliteFailure(inner, _) = e {
         if inner.code == rusqlite::ErrorCode::DiskFull {
@@ -475,6 +500,10 @@ impl Filesystem for CofferFS {
             .and_then(|mut s| s.execute(params![ino as i64]))
             .is_ok()
             && tx
+                .prepare_cached("DELETE FROM xattrs WHERE ino=?1")
+                .and_then(|mut s| s.execute(params![ino as i64]))
+                .is_ok()
+            && tx
                 .prepare_cached("DELETE FROM inodes WHERE ino=?1")
                 .and_then(|mut s| s.execute(params![ino as i64]))
                 .is_ok()
@@ -535,9 +564,13 @@ impl Filesystem for CofferFS {
         }
         let now = db::now_secs();
         let ok = tx
-            .prepare_cached("DELETE FROM inodes WHERE ino=?1")
+            .prepare_cached("DELETE FROM xattrs WHERE ino=?1")
             .and_then(|mut s| s.execute(params![ino as i64]))
             .is_ok()
+            && tx
+                .prepare_cached("DELETE FROM inodes WHERE ino=?1")
+                .and_then(|mut s| s.execute(params![ino as i64]))
+                .is_ok()
             && tx
                 .prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino=?2")
                 .and_then(|mut s| s.execute(params![now, parent.0 as i64]))
@@ -646,6 +679,9 @@ impl Filesystem for CofferFS {
             if existing != ino {
                 let _ = tx
                     .prepare_cached("DELETE FROM data WHERE ino=?1")
+                    .and_then(|mut s| s.execute(params![existing as i64]));
+                let _ = tx
+                    .prepare_cached("DELETE FROM xattrs WHERE ino=?1")
                     .and_then(|mut s| s.execute(params![existing as i64]));
                 let _ = tx
                     .prepare_cached("DELETE FROM inodes WHERE ino=?1")
@@ -1003,6 +1039,186 @@ impl Filesystem for CofferFS {
             }
         };
         reply.statfs(blocks, bfree, bavail, 0, 1_000_000, 4096, 255, 4096);
+    }
+
+    fn setxattr(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        _position: u32,
+        reply: ReplyEmpty,
+    ) {
+        self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
+        if !self.has_xattrs {
+            reply.error(Errno::ENOTSUP);
+            return;
+        }
+        let Some(name) = name.to_str() else {
+            reply.error(Errno::EINVAL);
+            return;
+        };
+        if name.is_empty() || name.len() > XATTR_NAME_MAX {
+            reply.error(Errno::ERANGE);
+            return;
+        }
+        if value.len() > XATTR_SIZE_MAX {
+            reply.error(Errno::E2BIG);
+            return;
+        }
+        let mut con = self.con.lock().unwrap();
+        let tx = match con.transaction() {
+            Ok(t) => t,
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        match row_by_ino(&tx, ino.0) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        }
+        // XATTR_CREATE / XATTR_REPLACE are setxattr(2)'s own semantics:
+        // the caller asked for "only if absent" or "only if present".
+        let exists = tx
+            .prepare_cached("SELECT 1 FROM xattrs WHERE ino=?1 AND name=?2")
+            .and_then(|mut s| s.exists(params![ino.0 as i64, name]));
+        match exists {
+            Ok(true) if flags & libc::XATTR_CREATE != 0 => {
+                reply.error(Errno::EEXIST);
+                return;
+            }
+            Ok(false) if flags & libc::XATTR_REPLACE != 0 => {
+                reply.error(Errno::ENODATA);
+                return;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        }
+        let now = db::now_secs();
+        let ok = tx
+            .prepare_cached("INSERT OR REPLACE INTO xattrs (ino, name, value) VALUES (?1, ?2, ?3)")
+            .and_then(|mut s| s.execute(params![ino.0 as i64, name, value]))
+            .is_ok()
+            && tx
+                .prepare_cached("UPDATE inodes SET ctime=?1 WHERE ino=?2")
+                .and_then(|mut s| s.execute(params![now, ino.0 as i64]))
+                .is_ok();
+        if !ok || tx.commit().is_err() {
+            reply.error(Errno::EIO);
+            return;
+        }
+        reply.ok();
+    }
+
+    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        self.touch();
+        let Some(name) = name.to_str() else {
+            reply.error(Errno::EINVAL);
+            return;
+        };
+        if !self.has_xattrs {
+            reply.error(Errno::ENODATA);
+            return;
+        }
+        let con = self.con.lock().unwrap();
+        let value: rusqlite::Result<Option<Vec<u8>>> = con
+            .prepare_cached("SELECT value FROM xattrs WHERE ino=?1 AND name=?2")
+            .and_then(|mut s| s.query_row(params![ino.0 as i64, name], |r| r.get(0)).optional());
+        match value {
+            Ok(Some(v)) => reply_xattr(reply, size, &v),
+            Ok(None) => reply.error(Errno::ENODATA),
+            Err(_) => reply.error(Errno::EIO),
+        }
+    }
+
+    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        self.touch();
+        if !self.has_xattrs {
+            reply_xattr(reply, size, &[]);
+            return;
+        }
+        let con = self.con.lock().unwrap();
+        // The listxattr(2) format: every name NUL-terminated, concatenated.
+        let names: rusqlite::Result<Vec<u8>> = con
+            .prepare_cached("SELECT name FROM xattrs WHERE ino=?1 ORDER BY name")
+            .and_then(|mut s| {
+                let rows = s.query_map(params![ino.0 as i64], |r| r.get::<_, String>(0))?;
+                let mut out = Vec::new();
+                for name in rows {
+                    out.extend_from_slice(name?.as_bytes());
+                    out.push(0);
+                }
+                Ok(out)
+            });
+        match names {
+            Ok(list) => reply_xattr(reply, size, &list),
+            Err(_) => reply.error(Errno::EIO),
+        }
+    }
+
+    fn removexattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
+        let Some(name) = name.to_str() else {
+            reply.error(Errno::EINVAL);
+            return;
+        };
+        if !self.has_xattrs {
+            reply.error(Errno::ENODATA);
+            return;
+        }
+        let mut con = self.con.lock().unwrap();
+        let tx = match con.transaction() {
+            Ok(t) => t,
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        let removed = tx
+            .prepare_cached("DELETE FROM xattrs WHERE ino=?1 AND name=?2")
+            .and_then(|mut s| s.execute(params![ino.0 as i64, name]));
+        match removed {
+            Ok(0) => {
+                reply.error(Errno::ENODATA);
+                return;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        }
+        let now = db::now_secs();
+        let ok = tx
+            .prepare_cached("UPDATE inodes SET ctime=?1 WHERE ino=?2")
+            .and_then(|mut s| s.execute(params![now, ino.0 as i64]))
+            .is_ok();
+        if !ok || tx.commit().is_err() {
+            reply.error(Errno::EIO);
+            return;
+        }
+        reply.ok();
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: fuser::AccessFlags, reply: ReplyEmpty) {

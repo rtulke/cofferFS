@@ -78,6 +78,26 @@ so tools like `find` don't need an extra syscall per file just to answer
 See **Performance at scale** below for the full write-throughput benchmark.
 
 
+### Extended attributes
+
+Extended attributes (`user.*`, `security.*`, whatever a tool sets) are
+stored per inode in their own table, `xattrs`, with the same limits Linux
+itself applies (255-byte names, 64 KiB values, `E2BIG`/`ERANGE` beyond
+that) and the same `XATTR_CREATE`/`XATTR_REPLACE` semantics as
+`setxattr(2)`. They follow the inode through renames, are deleted with
+it, and travel with `cp --preserve=xattr`, `rsync -X` and `coffer backup`.
+
+The table is an additive extra, not a schema version bump: a writable open
+creates it when missing (`CREATE TABLE IF NOT EXISTS`), and a version of
+`coffer` from before 0.1.3 never looks at it - it only reads `meta`,
+`inodes` and `data` - so containers keep opening in both directions.
+The one visible difference is that an older `coffer` unlinking a file
+leaves that file's attribute rows behind; they are harmless orphans, a
+few bytes each, and `compact` does not need them gone. A read-only mount
+of a container that predates the table simply reports no attributes. The
+integration suite exercises exactly this cross-version round trip against
+the previous release.
+
 ## Registered vaults (`~/.coffer/config`)
 
 Typing the container path and the mountpoint on every mount gets old fast,

@@ -9,7 +9,9 @@
 #     tests/integration.sh                      # target/release/coffer
 #     COFFER=/usr/bin/coffer tests/integration.sh
 #
-# Linux only (FUSE). Needs fusermount3, rsync, flock, sha256sum, truncate.
+# Linux only (FUSE). Needs fusermount3, rsync, flock, sha256sum, truncate,
+# getfattr/setfattr (package attr) and python3. Set COFFER_PREV to an older
+# release's binary to also run the cross-version compatibility section.
 # Uses its own registry (COFFER_CONFIG) and a temp directory; never touches
 # ~/.coffer. Exit status is the number of failed checks.
 set -uo pipefail
@@ -57,7 +59,7 @@ umnt() {  # umnt CONTAINER MOUNTPOINT
 }
 
 cleanup() {
-    for m in "$MNT" "$WORK/mnt2" "$WORK/mnt3"; do
+    for m in "$MNT" "$WORK/mnt2" "$WORK/mnt3" "$WORK/mnt-old"; do
         is_mounted "$m" 2>/dev/null && fusermount3 -u -z "$m" 2>/dev/null
     done
     sleep 0.3
@@ -252,6 +254,94 @@ expect_fail "--password-command empty output" "$COFFER" info "$V" --password-com
 check "add --password-command alias" "$COFFER" add pc "$V" "$MNT" --password-command "cat $PW"
 check "mount via password_command" bash -c "'$COFFER' mount pc >/dev/null && wait_mounted '$MNT'"
 check "umount"             bash -c "'$COFFER' umount pc >/dev/null && wait_unmounted '$MNT'"
+
+# ---------------------------------------------------------------------------
+section "extended attributes"
+check "mount"              mnt "$V" "$MNT"
+check "file for xattrs"    bash -c "echo hi > '$MNT/xf'"
+check "setfattr user.color" setfattr -n user.color -v blue "$MNT/xf"
+eq "getfattr value" "blue" "$(getfattr -n user.color --only-values "$MNT/xf" 2>/dev/null)"
+check "second attribute"   setfattr -n user.size -v big "$MNT/xf"
+eq "listxattr shows both" "2" "$(getfattr -d "$MNT/xf" 2>/dev/null | grep -c '^user\.')"
+check "removexattr"        setfattr -x user.size "$MNT/xf"
+eq "listxattr shows one"  "1" "$(getfattr -d "$MNT/xf" 2>/dev/null | grep -c '^user\.')"
+expect_fail "getxattr of removed name" getfattr -n user.size "$MNT/xf"
+expect_fail "removexattr of missing name" setfattr -x user.size "$MNT/xf"
+check "xattr on a directory" bash -c "mkdir '$MNT/xd' && setfattr -n user.dir -v yes '$MNT/xd'"
+eq "directory xattr value" "yes" "$(getfattr -n user.dir --only-values "$MNT/xd" 2>/dev/null)"
+check "setxattr flags and limits (python)" python3 - "$MNT/xf" <<'PY'
+import os, sys
+p = sys.argv[1]
+try:
+    os.setxattr(p, "user.color", b"x", os.XATTR_CREATE); sys.exit("XATTR_CREATE on existing name succeeded")
+except FileExistsError:
+    pass
+try:
+    os.setxattr(p, "user.nope", b"x", os.XATTR_REPLACE); sys.exit("XATTR_REPLACE on missing name succeeded")
+except OSError as e:
+    assert e.errno == 61, e     # ENODATA
+try:
+    os.setxattr(p, "user.big", b"x" * 70000); sys.exit("70000-byte value accepted")
+except OSError as e:
+    assert e.errno in (7, 34), e   # E2BIG / ERANGE
+os.setxattr(p, "user.max", b"y" * 65536)
+assert len(os.getxattr(p, "user.max")) == 65536
+os.setxattr(p, "user.bin", bytes(range(256)))
+assert os.getxattr(p, "user.bin") == bytes(range(256))
+assert sorted(os.listxattr(p)) == ["user.bin", "user.color", "user.max"], os.listxattr(p)
+PY
+check "cp --preserve=xattr" cp --preserve=xattr "$MNT/xf" "$MNT/xf2"
+eq "copied xattr value" "blue" "$(getfattr -n user.color --only-values "$MNT/xf2" 2>/dev/null)"
+check "rsync -X into mount"  bash -c "mkdir -p '$WORK/xsrc' && echo a > '$WORK/xsrc/a' && setfattr -n user.rs -v 1 '$WORK/xsrc/a' && rsync -aX '$WORK/xsrc/' '$MNT/xtree/'"
+eq "rsync -X preserved xattr" "1" "$(getfattr -n user.rs --only-values "$MNT/xtree/a" 2>/dev/null)"
+check "rename keeps xattrs" mv "$MNT/xf2" "$MNT/xf3"
+eq "xattr after rename" "blue" "$(getfattr -n user.color --only-values "$MNT/xf3" 2>/dev/null)"
+check "rename over a file with xattrs" bash -c "echo z > '$MNT/plain' && mv '$MNT/plain' '$MNT/xf3'"
+expect_fail "overwritten file's xattrs are gone" getfattr -n user.color "$MNT/xf3"
+check "unlink a file with xattrs" rm "$MNT/xf3"
+check "umount"             umnt "$V" "$MNT"
+check "remount"            mnt "$V" "$MNT"
+eq "xattr survives remount" "blue" "$(getfattr -n user.color --only-values "$MNT/xf" 2>/dev/null)"
+eq "directory xattr survives remount" "yes" "$(getfattr -n user.dir --only-values "$MNT/xd" 2>/dev/null)"
+check "umount"             umnt "$V" "$MNT"
+check "mount read-only"    mnt "$V" "$MNT" -r
+eq "getxattr on read-only mount" "blue" "$(getfattr -n user.color --only-values "$MNT/xf" 2>/dev/null)"
+expect_fail "setxattr refused on read-only mount" setfattr -n user.x -v y "$MNT/xf"
+expect_fail "removexattr refused on read-only mount" setfattr -x user.color "$MNT/xf"
+check "umount"             umnt "$V" "$MNT"
+check "check after xattrs" "$COFFER" check "$V" --password-file "$PW"
+
+# ---------------------------------------------------------------------------
+# Cross-version compatibility, when a previous release is available
+# (COFFER_PREV=/path/to/older/coffer): containers must open in both
+# directions, and what the newer version adds (the xattrs table) must not
+# get in the older one's way.
+if [ -n "${COFFER_PREV:-}" ] && [ -x "$COFFER_PREV" ]; then
+    section "compatibility with $("$COFFER_PREV" --version)"
+    OLDV="$WORK/old.coffer"; OLDM="$WORK/mnt-old"; mkdir -p "$OLDM"
+    check "previous version creates a container" "$COFFER_PREV" create "$OLDV" --password-file "$PW"
+    check "this version mounts it"    mnt "$OLDV" "$OLDM"
+    check "this version writes to it" bash -c "echo new > '$OLDM/from-new' && setfattr -n user.k -v v '$OLDM/from-new'"
+    check "umount"                    umnt "$OLDV" "$OLDM"
+    check "previous version checks it after our writes" "$COFFER_PREV" check "$OLDV" --password-file "$PW"
+    check "previous version mounts it" bash -c "'$COFFER_PREV' mount '$OLDV' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
+    eq "previous version reads our file" "new" "$(cat "$OLDM/from-new")"
+    check "previous version writes"   bash -c "echo old > '$OLDM/from-old'"
+    check "umount (previous version)" bash -c "'$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$OLDV'"
+    check "this version mounts it again" mnt "$OLDV" "$OLDM"
+    eq "our xattr survived the round trip" "v" "$(getfattr -n user.k --only-values "$OLDM/from-new" 2>/dev/null)"
+    eq "previous version's file is there" "old" "$(cat "$OLDM/from-old")"
+    check "umount"                    umnt "$OLDV" "$OLDM"
+    check "previous version mounts this version's container" bash -c "'$COFFER_PREV' mount '$V' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
+    eq "previous version reads it" "250" "$(cat "$OLDM/many/f250")"
+    check "umount (previous version)" bash -c "'$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$V'"
+    check "previous version checks this version's container" "$COFFER_PREV" check "$V" --password-file "$PW"
+    check "read-only mount of a container without the xattrs table" bash -c "'$COFFER_PREV' create '$WORK/old2.coffer' --password-file '$PW' >/dev/null && '$COFFER' mount '$WORK/old2.coffer' '$OLDM' -r --password-file '$PW' --log '$LOG' >/dev/null && wait_mounted '$OLDM'"
+    eq "listxattr is empty there" "" "$(getfattr -d "$OLDM" 2>/dev/null)"
+    check "umount"                    umnt "$WORK/old2.coffer" "$OLDM"
+else
+    echo; echo "== compatibility: skipped (set COFFER_PREV to a previous release's binary)"
+fi
 
 # ---------------------------------------------------------------------------
 echo

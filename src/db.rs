@@ -6,6 +6,10 @@ use std::path::Path;
 use zeroize::Zeroizing;
 
 pub const BLOCK_SIZE: i64 = 128 * 1024;
+// Schema 1 with additive extras: the `xattrs` table (0.1.3) is created when
+// missing and simply ignored by older versions, which only ever touch
+// `meta`, `inodes` and `data` - so containers stay usable in both
+// directions. Only a change to those three tables bumps this number.
 pub const SCHEMA_VERSION: &str = "1";
 pub const ROOT_INO: u64 = 1;
 
@@ -41,6 +45,31 @@ CREATE TABLE data (
     PRIMARY KEY (ino, block_no)
 ) WITHOUT ROWID;
 ";
+
+/// Extended attributes, one row per (inode, name). Kept separate from the
+/// schema above so it can be added to existing containers on open (see
+/// `open_db`): `CREATE TABLE IF NOT EXISTS` is a no-op on a container that
+/// already has it and an additive change on one from before 0.1.3.
+const XATTRS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS xattrs (
+    ino   INTEGER NOT NULL,
+    name  TEXT NOT NULL,
+    value BLOB NOT NULL,
+    PRIMARY KEY (ino, name)
+) WITHOUT ROWID;
+";
+
+/// Whether the container has the `xattrs` table. Always true after a
+/// writable `open_db`; false for a read-only open of a container created by
+/// a version before 0.1.3 and never since written by a newer one.
+pub fn has_xattrs(con: &Connection) -> bool {
+    con.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xattrs'",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
 
 /// PRAGMA statements don't support bound (?) parameters in SQLite, so the
 /// password has to be embedded as a quoted string literal. Escape any
@@ -97,6 +126,7 @@ pub fn create_container(path: &Path, password: &str, max_size: u64) -> Result<()
     con.execute_batch(&pragma_key_sql("key", password))?;
     con.execute_batch("PRAGMA cipher_page_size = 4096;")?;
     con.execute_batch(SCHEMA)?;
+    con.execute_batch(XATTRS_SCHEMA)?;
 
     let now = now_secs();
     con.execute(
@@ -172,6 +202,10 @@ pub fn open_db(path: &Path, password: &str, readonly: bool) -> Result<Connection
 
     if !readonly {
         con.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF;")?;
+        // Additive upgrade for containers from before 0.1.3; a no-op after
+        // the first time. Not done on read-only opens, which then just
+        // report no extended attributes.
+        con.execute_batch(XATTRS_SCHEMA)?;
     }
     // cache_size in KiB (negative = KiB rather than page count): keep far more
     // decrypted pages hot than SQLite's tiny ~2MB default, since every page miss
