@@ -4,7 +4,7 @@ PREFIX ?= /usr/local
 # automatically when set.
 CARGO_TARGET_DIR ?= target
 
-.PHONY: build release debug man completions install uninstall clean test check-deps
+.PHONY: build release debug man completions install uninstall clean test integration check-deps
 
 # Also generates the man page and completions, so that the documented
 # `make build` + `sudo make install` flow has everything ready before root
@@ -85,6 +85,11 @@ uninstall:
 
 test: check-deps
 	cargo test
+
+# The end-to-end suite against a real mount (Linux, needs fusermount3 and
+# rsync); builds the release binary first since that is what it tests.
+integration: release
+	tests/integration.sh
 
 clean:
 	cargo clean
