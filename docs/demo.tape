@@ -16,7 +16,7 @@ Set Width 1300
 Set Height 500
 Set Padding 18
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 45ms
+Set TypingSpeed 50ms
 # English tool output regardless of the rendering host's locale.
 Env LC_ALL "C.UTF-8"
 
