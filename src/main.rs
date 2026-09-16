@@ -33,6 +33,10 @@ enum Cmd {
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Run this shell command and use the first line of its output as the
+        /// password, e.g. `secret-tool lookup coffer work` or `pass show coffer/work`
+        #[arg(long, value_name = "CMD", conflicts_with = "password_file")]
+        password_command: Option<String>,
         /// Also register the new container under this alias in ~/.coffer/config
         /// (together with --mountpoint), so `coffer mount ALIAS` works from then on
         #[arg(long, value_name = "ALIAS", requires = "mountpoint")]
@@ -65,6 +69,10 @@ enum Cmd {
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Run this shell command and use the first line of its output as the
+        /// password, e.g. `secret-tool lookup coffer work` or `pass show coffer/work`
+        #[arg(long, value_name = "CMD", conflicts_with = "password_file")]
+        password_command: Option<String>,
         /// Mount read-only: the container is opened read-only and every
         /// write is refused with EROFS (also: --ro)
         #[arg(short = 'r', long, visible_alias = "ro")]
@@ -98,6 +106,9 @@ enum Cmd {
         /// Default --password-file for `coffer mount ALIAS`
         #[arg(long, value_name = "FILE")]
         password_file: Option<PathBuf>,
+        /// Default --password-command for `coffer mount ALIAS`
+        #[arg(long, value_name = "CMD", conflicts_with = "password_file")]
+        password_command: Option<String>,
         /// Default --log for `coffer mount ALIAS`
         #[arg(long, value_name = "FILE")]
         log_file: Option<PathBuf>,
@@ -116,6 +127,10 @@ enum Cmd {
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Run this shell command and use the first line of its output as the
+        /// password, e.g. `secret-tool lookup coffer work` or `pass show coffer/work`
+        #[arg(long, value_name = "CMD", conflicts_with = "password_file")]
+        password_command: Option<String>,
     },
     /// Make a consistent copy (safe even while mounted)
     Backup {
@@ -125,6 +140,10 @@ enum Cmd {
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Run this shell command and use the first line of its output as the
+        /// password, e.g. `secret-tool lookup coffer work` or `pass show coffer/work`
+        #[arg(long, value_name = "CMD", conflicts_with = "password_file")]
+        password_command: Option<String>,
     },
     /// Change the container password
     Passwd {
@@ -133,6 +152,10 @@ enum Cmd {
         /// Read the current password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Run this shell command and use the first line of its output as the
+        /// password, e.g. `secret-tool lookup coffer work` or `pass show coffer/work`
+        #[arg(long, value_name = "CMD", conflicts_with = "password_file")]
+        password_command: Option<String>,
         /// Read the new password from this file instead of prompting
         #[arg(long)]
         new_password_file: Option<PathBuf>,
@@ -144,6 +167,10 @@ enum Cmd {
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Run this shell command and use the first line of its output as the
+        /// password, e.g. `secret-tool lookup coffer work` or `pass show coffer/work`
+        #[arg(long, value_name = "CMD", conflicts_with = "password_file")]
+        password_command: Option<String>,
     },
     /// Reclaim disk space after deletions (VACUUM); refuses to run against a mounted container
     Compact {
@@ -152,6 +179,10 @@ enum Cmd {
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Run this shell command and use the first line of its output as the
+        /// password, e.g. `secret-tool lookup coffer work` or `pass show coffer/work`
+        #[arg(long, value_name = "CMD", conflicts_with = "password_file")]
+        password_command: Option<String>,
     },
     /// Print a shell completion script to stdout
     Completions {
@@ -234,7 +265,17 @@ fn read_password(confirm: bool) -> Result<Zeroizing<String>> {
 
 /// A password file is its own confirmation (there's nothing to retype
 /// against), so `confirm` only applies to the interactive fallback.
-fn read_password_source(password_file: Option<&Path>, confirm: bool) -> Result<Zeroizing<String>> {
+fn read_password_source(
+    password_file: Option<&Path>,
+    password_command: Option<&str>,
+    confirm: bool,
+) -> Result<Zeroizing<String>> {
+    if let Some(cmd) = password_command {
+        if password_file.is_some() {
+            bail!("password_file and password_command are both set - use one");
+        }
+        return read_password_from_command(cmd);
+    }
     let Some(path) = password_file else {
         return read_password(confirm);
     };
@@ -248,6 +289,37 @@ fn read_password_source(password_file: Option<&Path>, confirm: bool) -> Result<Z
     let pw = Zeroizing::new(content.lines().next().unwrap_or("").to_string());
     if pw.is_empty() {
         bail!("empty password in {}", path.display());
+    }
+    Ok(pw)
+}
+
+/// Runs `cmd` through `sh -c` and takes the first line of its stdout as
+/// the password - the way gocryptfs's -extpass works, so any secret store
+/// with a command-line client fits: `secret-tool lookup coffer work`
+/// (GNOME Keyring / KDE Wallet), `pass show coffer/work`, `op read ...`
+/// (1Password), `bw get password ...` (Bitwarden), or a GUI prompt such as
+/// `zenity --password`. stdin is closed so a command that would prompt
+/// fails instead of hanging; stderr passes through so its errors are seen.
+/// The password never appears on a command line or in a file this way.
+fn read_password_from_command(cmd: &str) -> Result<Zeroizing<String>> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .with_context(|| format!("running password command {cmd:?}"))?;
+    let stdout = Zeroizing::new(output.stdout);
+    if !output.status.success() {
+        bail!("password command {cmd:?} failed: {}", output.status);
+    }
+    let first = stdout.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    let pw = Zeroizing::new(
+        String::from_utf8(first.strip_suffix(b"\r").unwrap_or(first).to_vec())
+            .context("password command printed invalid UTF-8")?,
+    );
+    if pw.is_empty() {
+        bail!("password command {cmd:?} printed nothing");
     }
     Ok(pw)
 }
@@ -266,9 +338,9 @@ fn warn_if_world_readable(path: &Path) {
     }
 }
 
-fn cmd_create(file: &Path, max_size: Option<String>, password_file: Option<&Path>) -> Result<()> {
+fn cmd_create(file: &Path, max_size: Option<String>, password_file: Option<&Path>, password_command: Option<&str>) -> Result<()> {
     let max_size = max_size.map(|s| parse_size(&s)).transpose()?.unwrap_or(0);
-    let password = read_password_source(password_file, true)?;
+    let password = read_password_source(password_file, password_command, true)?;
     db::create_container(file, &password, max_size)?;
     if max_size > 0 {
         println!("coffer: created {} (grows automatically up to {} bytes)", file.display(), max_size);
@@ -286,6 +358,7 @@ struct MountOpts {
     idle_timeout: Option<String>,
     compact_on_idle: Option<String>,
     password_file: Option<PathBuf>,
+    password_command: Option<String>,
     read_only: bool,
     log: Option<PathBuf>,
 }
@@ -294,7 +367,13 @@ impl MountOpts {
     fn with_defaults_from(mut self, vault: &Vault) -> MountOpts {
         self.idle_timeout = self.idle_timeout.or_else(|| vault.idle_timeout.clone());
         self.compact_on_idle = self.compact_on_idle.or_else(|| vault.compact_on_idle.clone());
-        self.password_file = self.password_file.or_else(|| vault.password_file.clone());
+        // A --password-file on the command line also silences a stored
+        // password_command, and vice versa: the flag given wins as a whole,
+        // so the two never end up combined from different sources.
+        if self.password_file.is_none() && self.password_command.is_none() {
+            self.password_file = vault.password_file.clone();
+            self.password_command = vault.password_command.clone();
+        }
         self.log = self.log.or_else(|| vault.log_file.clone());
         // A stored read_only can only add restriction; there's no flag to
         // override it back to writable, which is the point of storing it.
@@ -406,7 +485,7 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
     }
     let abs_mountpoint = mountpoint.canonicalize()?;
 
-    let password = read_password_source(opts.password_file.as_deref(), false)?;
+    let password = read_password_source(opts.password_file.as_deref(), opts.password_command.as_deref(), false)?;
     let con = db::open_db(file, &password, opts.read_only)?;
     let max_size = db::read_max_size(&con);
 
@@ -1070,8 +1149,8 @@ fn cmd_list(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_check(file: &Path, password_file: Option<&Path>) -> Result<()> {
-    let password = read_password_source(password_file, false)?;
+fn cmd_check(file: &Path, password_file: Option<&Path>, password_command: Option<&str>) -> Result<()> {
+    let password = read_password_source(password_file, password_command, false)?;
     let con = db::open_db(file, &password, true)?;
 
     // SQLCipher's own "PRAGMA cipher_integrity_check" has a confirmed upstream bug
@@ -1146,8 +1225,8 @@ fn cmd_check(file: &Path, password_file: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_backup(file: &Path, dest: &Path, password_file: Option<&Path>) -> Result<()> {
-    let password = read_password_source(password_file, false)?;
+fn cmd_backup(file: &Path, dest: &Path, password_file: Option<&Path>, password_command: Option<&str>) -> Result<()> {
+    let password = read_password_source(password_file, password_command, false)?;
     let con = db::open_db(file, &password, true)?;
     let mut dest_con = rusqlite::Connection::open(dest)?;
     dest_con.execute_batch(&db::pragma_key_sql("key", &password))?;
@@ -1167,24 +1246,24 @@ fn cmd_backup(file: &Path, dest: &Path, password_file: Option<&Path>) -> Result<
     Ok(())
 }
 
-fn cmd_passwd(file: &Path, password_file: Option<&Path>, new_password_file: Option<&Path>) -> Result<()> {
+fn cmd_passwd(file: &Path, password_file: Option<&Path>, password_command: Option<&str>, new_password_file: Option<&Path>) -> Result<()> {
     let _lock = db::lock_exclusive(file)?;
     if password_file.is_none() {
         println!("Current password:");
     }
-    let old = read_password_source(password_file, false)?;
+    let old = read_password_source(password_file, password_command, false)?;
     let con = db::open_db(file, &old, false)?;
     if new_password_file.is_none() {
         println!("New password:");
     }
-    let new = read_password_source(new_password_file, true)?;
+    let new = read_password_source(new_password_file, None, true)?;
     con.execute_batch(&db::pragma_key_sql("rekey", &new))?;
     println!("coffer: password changed.");
     Ok(())
 }
 
-fn cmd_info(file: &Path, password_file: Option<&Path>) -> Result<()> {
-    let password = read_password_source(password_file, false)?;
+fn cmd_info(file: &Path, password_file: Option<&Path>, password_command: Option<&str>) -> Result<()> {
+    let password = read_password_source(password_file, password_command, false)?;
     let con = db::open_db(file, &password, true)?;
     let files: i64 = con.query_row("SELECT COUNT(*) FROM inodes WHERE kind=1", [], |r| r.get(0))?;
     let dirs: i64 = con.query_row("SELECT COUNT(*) FROM inodes WHERE kind=0", [], |r| r.get(0))?;
@@ -1208,10 +1287,10 @@ fn cmd_info(file: &Path, password_file: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_compact(file: &Path, password_file: Option<&Path>) -> Result<()> {
+fn cmd_compact(file: &Path, password_file: Option<&Path>, password_command: Option<&str>) -> Result<()> {
     let _lock = db::lock_exclusive(file)?;
     db::set_temp_dir_beside(&std::path::absolute(file)?);
-    let password = read_password_source(password_file, false)?;
+    let password = read_password_source(password_file, password_command, false)?;
     let before = std::fs::metadata(file)?.len();
     let con = db::open_db(file, &password, false)?;
     println!(
@@ -1248,7 +1327,7 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Create { file, max_size, password_file, save, mountpoint } => {
+        Cmd::Create { file, max_size, password_file, password_command, save, mountpoint } => {
             // Alias and config are checked up front: a bad alias or an
             // unreadable config shouldn't surface only after the container
             // has already been created.
@@ -1259,15 +1338,15 @@ fn main() -> Result<()> {
                 }
                 None => None,
             };
-            cmd_create(&file, max_size, password_file.as_deref())?;
+            cmd_create(&file, max_size, password_file.as_deref(), password_command.as_deref())?;
             if let (Some(alias), Some(cfg)) = (save, cfg.as_mut()) {
                 let mountpoint = mountpoint.expect("clap: --save requires --mountpoint");
-                cmd_add(cfg, Vault { alias, file, mountpoint, idle_timeout: None, compact_on_idle: None, password_file: None, log_file: None, read_only: false })?;
+                cmd_add(cfg, Vault { alias, file, mountpoint, idle_timeout: None, compact_on_idle: None, password_file: None, password_command: None, log_file: None, read_only: false })?;
             }
             Ok(())
         }
-        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file, read_only, log } => {
-            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file, read_only, log };
+        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log } => {
+            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log };
             let (file, mountpoint, opts) = plan_mount(target.as_deref(), mountpoint, opts)?;
             if let Some(alias) = save {
                 let vault = Vault {
@@ -1277,6 +1356,7 @@ fn main() -> Result<()> {
                     idle_timeout: opts.idle_timeout.clone(),
                     compact_on_idle: opts.compact_on_idle.clone(),
                     password_file: opts.password_file.clone(),
+                    password_command: opts.password_command.clone(),
                     log_file: opts.log.clone(),
                     read_only: opts.read_only,
                 };
@@ -1285,21 +1365,30 @@ fn main() -> Result<()> {
             cmd_mount(&file, &mountpoint, opts)
         }
         Cmd::Umount { target } => cmd_umount(target.as_deref()),
-        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file, read_only } => {
-            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file, read_only };
+        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only } => {
+            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only };
             cmd_add(&mut Config::load()?, vault)
         }
         Cmd::Remove { alias } => cmd_remove(&mut Config::load()?, &alias),
         Cmd::List => cmd_list(&Config::load()?),
-        Cmd::Check { file, password_file } => cmd_check(&resolve_container(&file)?, password_file.as_deref()),
-        Cmd::Backup { file, dest, password_file } => {
-            cmd_backup(&resolve_container(&file)?, &dest, password_file.as_deref())
+        Cmd::Check { file, password_file, password_command } => {
+            cmd_check(&resolve_container(&file)?, password_file.as_deref(), password_command.as_deref())
         }
-        Cmd::Passwd { file, password_file, new_password_file } => {
-            cmd_passwd(&resolve_container(&file)?, password_file.as_deref(), new_password_file.as_deref())
+        Cmd::Backup { file, dest, password_file, password_command } => {
+            cmd_backup(&resolve_container(&file)?, &dest, password_file.as_deref(), password_command.as_deref())
         }
-        Cmd::Info { file, password_file } => cmd_info(&resolve_container(&file)?, password_file.as_deref()),
-        Cmd::Compact { file, password_file } => cmd_compact(&resolve_container(&file)?, password_file.as_deref()),
+        Cmd::Passwd { file, password_file, password_command, new_password_file } => cmd_passwd(
+            &resolve_container(&file)?,
+            password_file.as_deref(),
+            password_command.as_deref(),
+            new_password_file.as_deref(),
+        ),
+        Cmd::Info { file, password_file, password_command } => {
+            cmd_info(&resolve_container(&file)?, password_file.as_deref(), password_command.as_deref())
+        }
+        Cmd::Compact { file, password_file, password_command } => {
+            cmd_compact(&resolve_container(&file)?, password_file.as_deref(), password_command.as_deref())
+        }
         Cmd::Completions { shell } => {
             cmd_completions(shell);
             Ok(())

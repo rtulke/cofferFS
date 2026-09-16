@@ -11,6 +11,8 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR SIZE ]
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-password\-command
+.IR CMD ]
 .RB [ \-\-save
 .I ALIAS
 .B \-\-mountpoint
@@ -28,6 +30,8 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR DURATION ]
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-password\-command
+.IR CMD ]
 .RB [ \-\-read\-only ]
 .RB [ \-\-log
 .IR FILE ]
@@ -43,6 +47,8 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR DURATION ]
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-password\-command
+.IR CMD ]
 .RB [ \-\-log\-file
 .IR FILE ]
 .RB [ \-\-read\-only ]
@@ -56,17 +62,23 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR file | alias
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-password\-command
+.IR CMD ]
 .br
 .B coffer backup
 .IR file | alias
 .I dest
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-password\-command
+.IR CMD ]
 .br
 .B coffer passwd
 .IR file | alias
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-password\-command
+.IR CMD ]
 .RB [ \-\-new\-password\-file
 .IR FILE ]
 .br
@@ -74,11 +86,15 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR file | alias
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-password\-command
+.IR CMD ]
 .br
 .B coffer compact
 .IR file | alias
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-password\-command
+.IR CMD ]
 .br
 .B coffer completions
 .I shell
@@ -120,6 +136,32 @@ as an explicit alternative to prompting \- reads one line from
 .IR FILE ,
 useful for cron jobs and systemd units. A world\- or group\-readable
 password file prints a warning but is not refused outright.
+.B \-\-password\-command
+.I CMD
+runs
+.I CMD
+through
+.B sh \-c
+and takes the first line of its standard output as the password, so any
+secret store with a command-line client can supply it without the
+password ever touching a file or a command line:
+.BR "secret-tool lookup coffer work" " (GNOME Keyring, KDE Wallet),"
+.BR "pass show coffer/work" ,
+.BR "op read op://Private/coffer/password" " (1Password),"
+.BR "bw get password coffer" " (Bitwarden),"
+or a graphical prompt such as
+.BR "zenity \-\-password" .
+The command's stdin is closed, so one that would wait for input fails
+instead of hanging; its stderr passes through. A failing or silent
+command is an error. Mutually exclusive with
+.BR \-\-password\-file .
+Stored with
+.B add
+or
+.BR \-\-save ,
+either becomes the alias's default; a
+.BR \-\-password\-file " or " \-\-password\-command
+on the command line replaces both stored values.
 .PP
 Wherever a command takes a container
 .IR file ,
@@ -306,7 +348,7 @@ the mount daemon exits and releases the container's lock right away instead
 of lingering until the last holder lets go; anything that still had files
 open there gets I/O errors from then on.
 .TP
-.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE "] [\-\-log\-file " FILE "] [\-\-read\-only]
+.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE "] [\-\-password\-command " CMD "] [\-\-log\-file " FILE "] [\-\-read\-only]
 Register
 .I file
 (which must already exist) and
@@ -413,7 +455,7 @@ The per-user vault registry: one
 section per registered vault, with
 .BR file " and " mountpoint
 lines and optionally
-.BR idle_timeout ", " compact_on_idle ", " password_file ", " log_file " and " read_only
+.BR idle_timeout ", " compact_on_idle ", " password_file ", " password_command ", " log_file " and " read_only
 (same formats as the corresponding flags;
 .B read_only
 takes true or false). Written atomically with mode

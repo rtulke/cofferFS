@@ -170,6 +170,23 @@ coffer add work ~/.coffer/work.coffer ~/vault --password-file ~/.coffer/work.pw
 coffer mount work           # no prompt
 ```
 
+Better than a plaintext file: `--password-command CMD` runs a shell
+command and uses the first line of its output, so the password can live in
+whatever secret store you already use:
+
+| Store | `--password-command` |
+|---|---|
+| GNOME Keyring, KDE Wallet | `secret-tool lookup coffer work` |
+| pass / gopass | `pass show coffer/work` / `gopass show -o coffer/work` |
+| 1Password CLI | `op read "op://Private/coffer work/password"` |
+| Bitwarden CLI | `bw get password coffer-work` |
+| A graphical prompt | `zenity --password --title=coffer` |
+| systemd unit | `systemd-ask-password "coffer work:"` |
+
+```bash
+coffer add work ~/.coffer/work.coffer ~/vault --password-command 'secret-tool lookup coffer work'
+```
+
 A systemd user unit mounts a vault at login and unmounts it at logout:
 
 ```ini
@@ -229,17 +246,17 @@ there is something meaningful to reclaim.
 
 | Command | What it does | Notable options |
 |---|---|---|
-| `create FILE` | Create a new container (password prompted twice) | `--max-size 10G`, `--save ALIAS --mountpoint DIR`, `--password-file` |
-| `mount [FILE\|ALIAS] [DIR]` | Mount as the current user; no argument = registered vault or menu | `--save ALIAS`, `--idle-timeout`, `--compact-on-idle`, `--foreground`, `--password-file`, `--read-only` (`-r`), `--log FILE` (`-l`) |
+| `create FILE` | Create a new container (password prompted twice) | `--max-size 10G`, `--save ALIAS --mountpoint DIR`, `--password-file`, `--password-command` |
+| `mount [FILE\|ALIAS] [DIR]` | Mount as the current user; no argument = registered vault or menu | `--save ALIAS`, `--idle-timeout`, `--compact-on-idle`, `--foreground`, `--password-file`, `--password-command`, `--read-only` (`-r`), `--log FILE` (`-l`) |
 | `umount [DIR\|ALIAS]` | Unmount; no argument = the mounted registered vault or menu | |
-| `add ALIAS FILE DIR` | Register a vault in `~/.coffer/config` | `--idle-timeout`, `--compact-on-idle`, `--password-file`, `--log-file`, `--read-only` |
+| `add ALIAS FILE DIR` | Register a vault in `~/.coffer/config` | `--idle-timeout`, `--compact-on-idle`, `--password-file`, `--password-command`, `--log-file`, `--read-only` |
 | `remove ALIAS` | Forget an alias (the file stays) | |
 | `list` | Registered vaults and whether each is mounted | |
-| `info FILE\|ALIAS` | Counts and sizes | `--password-file` |
-| `check FILE\|ALIAS` | Integrity check, read-only | `--password-file` |
-| `backup FILE\|ALIAS DEST` | Consistent copy via SQLite's online backup | `--password-file` |
-| `passwd FILE\|ALIAS` | Change the password | `--password-file`, `--new-password-file` |
-| `compact FILE\|ALIAS` | VACUUM, reclaims freed space | `--password-file` |
+| `info FILE\|ALIAS` | Counts and sizes | `--password-file`, `--password-command` |
+| `check FILE\|ALIAS` | Integrity check, read-only | `--password-file`, `--password-command` |
+| `backup FILE\|ALIAS DEST` | Consistent copy via SQLite's online backup | `--password-file`, `--password-command` |
+| `passwd FILE\|ALIAS` | Change the password | `--password-file`, `--password-command`, `--new-password-file` |
+| `compact FILE\|ALIAS` | VACUUM, reclaims freed space | `--password-file`, `--password-command` |
 | `completions SHELL` | Print bash/zsh/fish completions | |
 
 Durations take `s`, `m`, `h`, `d` suffixes (`45s`, `30m`, `2h`). Sizes take
