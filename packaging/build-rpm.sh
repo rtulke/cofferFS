@@ -11,9 +11,10 @@
 # actually ships. SQLCipher/OpenSSL are statically bundled (see Cargo.toml),
 # so libfuse3 is the only runtime library dependency that varies.
 #
-# The dist tag goes into the RPM's Release field (`1.fc44`, `1.el9`, ...),
-# the way distro packages themselves are named, so the file names come out
-# as coffer-<version>-1.<dist>.x86_64.rpm without any renaming step.
+# The distro id goes into the RPM's Release field (`1.fedora44`, `1.el9`,
+# ...), so the file names come out as coffer-<version>-1.<id>.x86_64.rpm -
+# the same spelled-out scheme as the .deb side, and without any renaming
+# step since RPM naming puts the Release field into the file name itself.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
@@ -22,8 +23,8 @@ command -v docker >/dev/null 2>&1 || RUNTIME=podman
 
 CARGO_GENERATE_RPM_VERSION=0.21.0
 
-# id -> image, and id -> dist tag. Kept as two ordered lists (not an
-# associative array) so the build order is deterministic.
+# id -> image. The ids are kept as an ordered list (not just the map's
+# keys) so the build order is deterministic.
 TARGET_IDS=(fedora43 fedora44 el9 el10 leap160 tumbleweed)
 declare -A TARGET_IMAGES=(
     [fedora43]=fedora:43
@@ -32,14 +33,6 @@ declare -A TARGET_IMAGES=(
     [el10]=almalinux:10
     [leap160]=opensuse/leap:16.0
     [tumbleweed]=opensuse/tumbleweed
-)
-declare -A TARGET_DIST=(
-    [fedora43]=fc43
-    [fedora44]=fc44
-    [el9]=el9
-    [el10]=el10
-    [leap160]=lp160
-    [tumbleweed]=tw
 )
 
 # Per package-manager family. rpm-build is installed so cargo-generate-rpm's
@@ -60,18 +53,17 @@ rm -f dist/coffer-*.rpm
 
 for id in "${TARGET_IDS[@]}"; do
     img="${TARGET_IMAGES[$id]}"
-    dist="${TARGET_DIST[$id]}"
     case "$img" in
         opensuse/*) install="$ZYPPER_INSTALL" ;;
         *)          install="$DNF_INSTALL" ;;
     esac
     echo "=========================================================="
-    echo "== Building for $id ($img, dist tag .$dist)"
+    echo "== Building for $id ($img)"
     echo "=========================================================="
     "$RUNTIME" run --rm \
         -e CARGO_TARGET_DIR="/work/target-$id" \
         -e INSTALL_CMD="$install" \
-        -e DIST="$dist" \
+        -e DIST="$id" \
         -e CARGO_GENERATE_RPM_VERSION="$CARGO_GENERATE_RPM_VERSION" \
         -v "$PWD:/work:Z" \
         -w /work \

@@ -27,16 +27,6 @@ declare -A TARGET_IMAGES=(
     [leap160]=opensuse/leap:16.0
     [tumbleweed]=opensuse/tumbleweed
 )
-# RPM dist tags, as put into the Release field by build-rpm.sh - the .rpm
-# file names carry these rather than the ids above.
-declare -A TARGET_DIST=(
-    [fedora43]=fc43
-    [fedora44]=fc44
-    [el9]=el9
-    [el10]=el10
-    [leap160]=lp160
-    [tumbleweed]=tw
-)
 
 # The package-manager half of the smoke test, per family. The functional
 # half (create, mount, write, read, umount, check) is shared below.
@@ -59,8 +49,8 @@ for id in "${TARGET_IDS[@]}"; do
     img="${TARGET_IMAGES[$id]}"
     case "$img" in
         debian:*|ubuntu:*) install="$APT_INSTALL";    PKG=$(ls dist/coffer_*_"${id}"_amd64.deb 2>/dev/null | head -1) ;;
-        opensuse/*)        install="$ZYPPER_INSTALL"; PKG=$(ls dist/coffer-*."${TARGET_DIST[$id]}".x86_64.rpm 2>/dev/null | head -1) ;;
-        *)                 install="$DNF_INSTALL";    PKG=$(ls dist/coffer-*."${TARGET_DIST[$id]}".x86_64.rpm 2>/dev/null | head -1) ;;
+        opensuse/*)        install="$ZYPPER_INSTALL"; PKG=$(ls dist/coffer-*."${id}".x86_64.rpm 2>/dev/null | head -1) ;;
+        *)                 install="$DNF_INSTALL";    PKG=$(ls dist/coffer-*."${id}".x86_64.rpm 2>/dev/null | head -1) ;;
     esac
     if [ -z "$PKG" ]; then
         echo "no package for $id in dist/ - run packaging/build-deb.sh / build-rpm.sh first" >&2

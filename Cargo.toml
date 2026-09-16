@@ -51,8 +51,8 @@ assets = [
 
 # RPM counterpart of the cargo-deb block above, consumed by cargo-generate-rpm
 # (packaging/build-rpm.sh and the release workflow). Same asset list; the
-# dist tag (.fc44, .el9, .lp160, ...) is not set here but injected per build
-# via `--set-metadata 'release = "1.<dist>"'`, since one RPM is built
+# distro id (.fedora44, .el9, .leap160, ...) is not set here but injected per
+# build via `--set-metadata 'release = "1.<id>"'`, since one RPM is built
 # natively per target distro - same libfuse3 SONAME reasoning as for the
 # .deb packages, see packaging/build-deb.sh.
 [package.metadata.generate-rpm]

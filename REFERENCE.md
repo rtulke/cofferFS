@@ -424,9 +424,12 @@ through the RPM world just the same - EL9/EL10 and Fedora 43 are on fuse
 3.10-3.16 (`libfuse3.so.3`), Fedora 44 and Tumbleweed on 3.18
 (`libfuse3.so.4`) - so each RPM is built natively in its distro's own
 container and its automatically discovered `Requires:` name whatever that
-distro ships. The dist tag lands in the RPM `Release` field
-(`coffer-0.1.0-1.fc44.x86_64.rpm`), the way distro packages themselves are
-named. Tumbleweed being a rolling release, its RPM matches Tumbleweed as of
+distro ships. The distro id lands in the RPM `Release` field
+(`coffer-0.1.0-1.fedora44.x86_64.rpm`), so the RPMs follow the same
+spelled-out naming as the `.deb` files without a rename step - RPM naming
+puts the `Release` field into the file name itself. `el9`/`el10` is the
+one abbreviation kept, since those packages serve RHEL, AlmaLinux, Rocky
+and Oracle alike. Tumbleweed being a rolling release, its RPM matches Tumbleweed as of
 the build - the rolling `latest` prerelease (rebuilt on every push to
 `main`) is the one to use there; a tagged release's Tumbleweed package goes
 stale the next time libfuse3 bumps. The RPMs are not GPG-signed, which

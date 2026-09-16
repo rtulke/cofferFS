@@ -37,12 +37,12 @@ sudo apt-get install ./coffer_*_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.
 
 Prebuilt `.rpm` packages for Fedora 43/44, EL9/EL10 (RHEL, AlmaLinux,
 Rocky, Oracle), openSUSE Leap 16.0 and Tumbleweed are on the same
-[Releases page](https://github.com/rtulke/cofferFS/releases). The dist tag
-in the file name says which is which:
+[Releases page](https://github.com/rtulke/cofferFS/releases). The distro
+name in the file says which is which:
 
 ```bash
-sudo dnf install ./coffer-*-1.<fc43|fc44|el9|el10>.x86_64.rpm
-sudo zypper install --allow-unsigned-rpm ./coffer-*-1.<lp160|tw>.x86_64.rpm
+sudo dnf install ./coffer-*-1.<fedora43|fedora44|el9|el10>.x86_64.rpm
+sudo zypper install --allow-unsigned-rpm ./coffer-*-1.<leap160|tumbleweed>.x86_64.rpm
 ```
 
 Tumbleweed users should take the rolling

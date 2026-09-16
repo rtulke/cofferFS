@@ -101,26 +101,21 @@ jobs:
         include:
           - id: fedora43
             image: fedora:43
-            dist: fc43
             family: dnf
           - id: fedora44
             image: fedora:44
-            dist: fc44
             family: dnf
           # AlmaLinux stands in for the whole EL family (RHEL, Rocky, Alma,
           # Oracle) - binary-compatible, and unlike rockylinux its official
           # Docker Hub images cover both 9 and 10.
           - id: el9
             image: almalinux:9
-            dist: el9
             family: dnf
           - id: el10
             image: almalinux:10
-            dist: el10
             family: dnf
           - id: leap160
             image: opensuse/leap:16.0
-            dist: lp160
             family: zypper
           # Rolling release: a package built today matches today's
           # Tumbleweed. The rolling "latest" prerelease (rebuilt on every
@@ -128,7 +123,6 @@ jobs:
           # release's Tumbleweed RPM goes stale whenever libfuse3 bumps.
           - id: tumbleweed
             image: opensuse/tumbleweed
-            dist: tw
             family: zypper
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
@@ -183,11 +177,13 @@ jobs:
       - name: Build shell completions
         run: make completions
 
-      # The dist tag goes into the Release field, the way distro packages
-      # themselves are named (coffer-0.1.0-1.fc44.x86_64.rpm) - no rename
-      # step needed, unlike the .deb side.
+      # The distro id goes into the Release field, so the file names follow
+      # the same spelled-out scheme as the .deb side
+      # (coffer-0.1.0-1.fedora44.x86_64.rpm next to
+      # coffer_0.1.0-1_debian12_amd64.deb) - with no rename step needed,
+      # since RPM naming puts the Release field into the file name itself.
       - name: Build .rpm
-        run: cargo generate-rpm --set-metadata 'release = "1.${{ matrix.dist }}"'
+        run: cargo generate-rpm --set-metadata 'release = "1.${{ matrix.id }}"'
 
       - uses: actions/upload-artifact@v7
         with:
