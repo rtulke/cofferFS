@@ -4,6 +4,8 @@
 mounts it as an ordinary directory - as a normal user, no root, no sudo.
 Inside, `cp`, `mv`, `rsync`, editors and file managers all just work.
 
+![coffer: create, mount, copy files in, list, unmount](docs/demo.gif)
+
 ```bash
 coffer create vault.coffer
 coffer mount  vault.coffer ~/vault
