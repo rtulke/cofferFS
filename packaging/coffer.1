@@ -1,4 +1,4 @@
-.TH COFFER 1 "2026-08-14" "coffer 0.1.0" "User Commands"
+.TH COFFER 1 "2026-09-16" "coffer 0.1.0" "User Commands"
 .SH NAME
 coffer \- growable, user-mountable encrypted single-file containers
 .SH SYNOPSIS
@@ -11,9 +11,16 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR SIZE ]
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-save
+.I ALIAS
+.B \-\-mountpoint
+.IR DIR ]
 .br
 .B coffer mount
-.I file mountpoint
+.RI [ file | alias
+.RI [ mountpoint ]]
+.RB [ \-\-save
+.IR ALIAS ]
 .RB [ \-\-foreground ]
 .RB [ \-\-idle\-timeout
 .IR DURATION ]
@@ -23,32 +30,47 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR FILE ]
 .br
 .B coffer umount
-.I mountpoint
+.RI [ mountpoint | alias ]
+.br
+.B coffer add
+.I alias file mountpoint
+.RB [ \-\-idle\-timeout
+.IR DURATION ]
+.RB [ \-\-compact\-on\-idle
+.IR DURATION ]
+.RB [ \-\-password\-file
+.IR FILE ]
+.br
+.B coffer remove
+.I alias
+.br
+.B coffer list
 .br
 .B coffer check
-.I file
+.IR file | alias
 .RB [ \-\-password\-file
 .IR FILE ]
 .br
 .B coffer backup
-.I file dest
+.IR file | alias
+.I dest
 .RB [ \-\-password\-file
 .IR FILE ]
 .br
 .B coffer passwd
-.I file
+.IR file | alias
 .RB [ \-\-password\-file
 .IR FILE ]
 .RB [ \-\-new\-password\-file
 .IR FILE ]
 .br
 .B coffer info
-.I file
+.IR file | alias
 .RB [ \-\-password\-file
 .IR FILE ]
 .br
 .B coffer compact
-.I file
+.IR file | alias
 .RB [ \-\-password\-file
 .IR FILE ]
 .br
@@ -93,6 +115,28 @@ as an explicit alternative to prompting \- reads one line from
 useful for cron jobs and systemd units. A world\- or group\-readable
 password file prints a warning but is not refused outright.
 .PP
+Wherever a command takes a container
+.IR file ,
+the alias of a vault registered in
+.I ~/.coffer/config
+(see
+.BR add ", " remove ", " list
+and
+.B FILES
+below) can be given instead.
+.BR mount " and " umount
+then take the mountpoint from the registry as well, and with no argument
+at all mount the one registered vault (respectively: unmount the one
+registered vault that is currently mounted), or offer a numbered menu
+when there are several. An alias is a bare word; an argument containing a
+.B /
+or starting with
+.B .
+or
+.B ~
+is always a path and never looked up, and a bare word that matches no
+alias is tried as a path.
+.PP
 .BR mount ", " passwd ", and " compact
 take an exclusive lock on the container before doing anything else, so at
 most one of them can run against a given container at a time \- attempting
@@ -123,16 +167,43 @@ e.g.
 to reject writes past a fixed ceiling with ENOSPC instead. With
 .BR \-\-password\-file ,
 the password is read once from the given file instead of prompted for
-twice.
+twice. With
+.B \-\-save
+.I ALIAS
+(which requires
+.B \-\-mountpoint
+.IR DIR ),
+the new container is also registered under that alias exactly as
+.B add
+would, so
+.B coffer mount
+.I ALIAS
+works from then on.
 .TP
-.BI "mount " file " " mountpoint " [\-\-foreground] [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION ]
+.BI "mount [" file | alias " [" mountpoint "]] [\-\-save " ALIAS "] [\-\-foreground] [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION ]
 Mount
 .I file
 at
 .I mountpoint
 as the current user.
 .I mountpoint
-is created if missing and must be empty. By default
+is created if missing and must be empty. If the first argument is the
+alias of a registered vault (see
+.BR add ),
+its file is mounted at its registered mountpoint (or at
+.I mountpoint
+if one is given anyway), with the entry's stored options as the defaults
+for any flag not given on the command line. With no arguments at all,
+the one registered vault is mounted; if several are registered, a
+numbered menu (alias, mountpoint, file, size on disk, last modified,
+mounted or not) asks which one, or - without a terminal to ask on -
+fails and says to name the alias.
+.B \-\-save
+.I ALIAS
+first registers the file/mountpoint pair, plus the options given here,
+under that alias, same as
+.BR add .
+By default
 .B coffer
 daemonizes and returns control to the shell immediately; pass
 .B \-\-foreground
@@ -172,10 +243,15 @@ large container can be minutes. Off by default; prefer running
 manually while the mount is idle instead, for containers used
 interactively.
 .TP
-.BI "umount " mountpoint
+.BI "umount [" mountpoint | alias ]
 Unmount a container previously mounted at
-.IR mountpoint .
-Shells out to
+.IR mountpoint ,
+or at the registered mountpoint of
+.IR alias .
+With no argument, unmounts the one registered vault that is currently
+mounted, or asks which via the same menu as
+.B mount
+if several are. Shells out to
 .BR fusermount3 (1)
 (falling back to
 .B fusermount
@@ -191,7 +267,33 @@ the mount daemon exits and releases the container's lock right away instead
 of lingering until the last holder lets go; anything that still had files
 open there gets I/O errors from then on.
 .TP
-.BI "check " file
+.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE ]
+Register
+.I file
+(which must already exist) and
+.I mountpoint
+(which needn't) under
+.I alias
+in
+.IR ~/.coffer/config ,
+replacing an existing entry of that name. Both paths are stored absolute.
+The options are stored with the entry and become the defaults for
+.B mount
+.IR alias .
+An alias consists of letters, digits,
+.BR \- ", " _ " and " . ,
+and must start with a letter or digit.
+.TP
+.BI "remove " alias
+Forget
+.IR alias .
+The container file itself is left untouched.
+.TP
+.B list
+Print every registered vault: alias, mountpoint, file, size on disk, last
+modified, and whether it is mounted right now.
+.TP
+.BI "check " file | alias
 Verify container integrity without modifying it: SQLCipher's per-page
 HMAC check followed by SQLite's structural
 .B integrity_check
@@ -202,7 +304,7 @@ while
 .I file
 is mounted.
 .TP
-.BI "backup " file " " dest
+.BI "backup " file | alias " " dest
 Write a byte-consistent copy of
 .I file
 to
@@ -211,7 +313,7 @@ using SQLite's online backup API. Safe to run while
 .I file
 is mounted and being actively written to.
 .TP
-.BI "passwd " file
+.BI "passwd " file | alias
 Change the container password. Prompts for the current password, then
 the new password twice (with confirmation), unless
 .B \-\-password\-file
@@ -221,13 +323,13 @@ are given. Refuses to run while
 .I file
 is mounted.
 .TP
-.BI "info " file
+.BI "info " file | alias
 Print on-disk size, logical data used, the configured size ceiling (if
 any), and directory/file/symlink counts. Safe to run while
 .I file
 is mounted.
 .TP
-.BI "compact " file
+.BI "compact " file | alias
 Run
 .B VACUUM
 against the container to reclaim disk space freed by earlier deletions
@@ -256,7 +358,28 @@ exits
 if it finds a genuine HMAC failure or a failing structural integrity
 check. Other commands exit non-zero on any error (wrong password,
 mountpoint not empty, I/O failure, etc.), with a message on stderr.
+.SH ENVIRONMENT
+.TP
+.B COFFER_CONFIG
+Path of the vault registry to use instead of
+.IR ~/.coffer/config .
 .SH FILES
+.TP
+.I ~/.coffer/config
+The per-user vault registry: one
+.BI [ alias ]
+section per registered vault, with
+.BR file " and " mountpoint
+lines and optionally
+.BR idle_timeout ", " compact_on_idle " and " password_file
+(same formats as the corresponding flags). Written atomically with mode
+0600 (a freshly created
+.I ~/.coffer
+gets 0700). Safe to edit by hand: comments on their own line are kept,
+and a leading
+.B ~
+in a path means
+.BR $HOME .
 .TP
 .I vault.coffer
 The container itself: a single SQLCipher (encrypted SQLite) database

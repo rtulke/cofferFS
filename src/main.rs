@@ -1,7 +1,9 @@
+mod config;
 mod db;
 mod fs;
 
 use anyhow::{bail, Context, Result};
+use config::{Config, Vault};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,11 +32,25 @@ enum Cmd {
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Also register the new container under this alias in ~/.coffer/config
+        /// (together with --mountpoint), so `coffer mount ALIAS` works from then on
+        #[arg(long, value_name = "ALIAS", requires = "mountpoint")]
+        save: Option<String>,
+        /// Mountpoint to register along with --save
+        #[arg(long, value_name = "DIR", requires = "save")]
+        mountpoint: Option<PathBuf>,
     },
     /// Mount a container as the current user
     Mount {
-        file: PathBuf,
-        mountpoint: PathBuf,
+        /// Container file, or the alias of a vault registered in ~/.coffer/config.
+        /// With no arguments at all: the one registered vault, or a menu if there are several
+        target: Option<String>,
+        /// Where to mount it - required for a file, taken from the config for an alias
+        mountpoint: Option<PathBuf>,
+        /// Also register this file + mountpoint (and the options given here) under
+        /// ALIAS in ~/.coffer/config, same as `coffer add`
+        #[arg(long, value_name = "ALIAS", requires = "mountpoint")]
+        save: Option<String>,
         /// Stay in the foreground instead of daemonizing
         #[arg(long)]
         foreground: bool,
@@ -50,17 +66,45 @@ enum Cmd {
         password_file: Option<PathBuf>,
     },
     /// Unmount a container
-    Umount { mountpoint: PathBuf },
+    Umount {
+        /// Mountpoint, or the alias of a registered vault. With no argument: the
+        /// one registered vault that is currently mounted, or a menu if several are
+        target: Option<String>,
+    },
+    /// Register a container + mountpoint under an alias in ~/.coffer/config
+    Add {
+        /// Name to use with `coffer mount ALIAS` etc. (letters, digits, '-', '_', '.')
+        alias: String,
+        /// Existing container file
+        file: PathBuf,
+        /// Directory to mount it at (created on mount if missing)
+        mountpoint: PathBuf,
+        /// Default --idle-timeout for `coffer mount ALIAS`
+        #[arg(long, value_name = "DURATION")]
+        idle_timeout: Option<String>,
+        /// Default --compact-on-idle for `coffer mount ALIAS`
+        #[arg(long, value_name = "DURATION")]
+        compact_on_idle: Option<String>,
+        /// Default --password-file for `coffer mount ALIAS`
+        #[arg(long, value_name = "FILE")]
+        password_file: Option<PathBuf>,
+    },
+    /// Forget a registered alias (the container file itself is left untouched)
+    Remove { alias: String },
+    /// List the registered vaults and whether each is currently mounted
+    List,
     /// Verify integrity without modifying the container
     Check {
-        file: PathBuf,
+        /// Container file, or the alias of a registered vault
+        file: String,
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
     },
     /// Make a consistent copy (safe even while mounted)
     Backup {
-        file: PathBuf,
+        /// Container file, or the alias of a registered vault
+        file: String,
         dest: PathBuf,
         /// Read the password from this file instead of prompting
         #[arg(long)]
@@ -68,7 +112,8 @@ enum Cmd {
     },
     /// Change the container password
     Passwd {
-        file: PathBuf,
+        /// Container file, or the alias of a registered vault
+        file: String,
         /// Read the current password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
@@ -78,14 +123,16 @@ enum Cmd {
     },
     /// Show container stats
     Info {
-        file: PathBuf,
+        /// Container file, or the alias of a registered vault
+        file: String,
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
     },
     /// Reclaim disk space after deletions (VACUUM); refuses to run against a mounted container
     Compact {
-        file: PathBuf,
+        /// Container file, or the alias of a registered vault
+        file: String,
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
@@ -212,17 +259,29 @@ fn cmd_create(file: &Path, max_size: Option<String>, password_file: Option<&Path
     Ok(())
 }
 
-fn cmd_mount(
-    file: &Path,
-    mountpoint: &Path,
+/// Everything `mount` needs besides the two paths: the CLI flags, with a
+/// registered vault's stored values (when mounting by alias) filling in
+/// whatever the command line left unset.
+struct MountOpts {
     foreground: bool,
     idle_timeout: Option<String>,
     compact_on_idle: Option<String>,
-    password_file: Option<&Path>,
-) -> Result<()> {
-    let idle_timeout = idle_timeout.map(|s| parse_duration(&s)).transpose()?;
-    let compact_on_idle = compact_on_idle.map(|s| parse_duration(&s)).transpose()?;
-    let abs_file = file.canonicalize()?;
+    password_file: Option<PathBuf>,
+}
+
+impl MountOpts {
+    fn with_defaults_from(mut self, vault: &Vault) -> MountOpts {
+        self.idle_timeout = self.idle_timeout.or_else(|| vault.idle_timeout.clone());
+        self.compact_on_idle = self.compact_on_idle.or_else(|| vault.compact_on_idle.clone());
+        self.password_file = self.password_file.or_else(|| vault.password_file.clone());
+        self
+    }
+}
+
+fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
+    let idle_timeout = opts.idle_timeout.map(|s| parse_duration(&s)).transpose()?;
+    let compact_on_idle = opts.compact_on_idle.map(|s| parse_duration(&s)).transpose()?;
+    let abs_file = file.canonicalize().with_context(|| file.display().to_string())?;
 
     // Acquired before even opening the database: if some other coffer
     // process already has this container locked (mounted, or a passwd/
@@ -232,15 +291,17 @@ fn cmd_mount(
     // container in the gap between us opening it and us locking it.
     let _lock = db::lock_exclusive(&abs_file)?;
 
-    let password = read_password_source(password_file, false)?;
-    let con = db::open_db(file, &password, false)?;
-    let max_size = db::read_max_size(&con);
-
+    // Checked before the password prompt: "mountpoint is not empty" is
+    // worth knowing before typing a passphrase, not after.
     std::fs::create_dir_all(mountpoint)?;
     if std::fs::read_dir(mountpoint)?.next().is_some() {
         bail!("mountpoint {} is not empty", mountpoint.display());
     }
     let abs_mountpoint = mountpoint.canonicalize()?;
+
+    let password = read_password_source(opts.password_file.as_deref(), false)?;
+    let con = db::open_db(file, &password, false)?;
+    let max_size = db::read_max_size(&con);
 
     println!("coffer: mounting {} at {}", file.display(), mountpoint.display());
 
@@ -269,7 +330,7 @@ fn cmd_mount(
     // normally, synchronously, with a real exit code.
     let session = fuser::Session::new(filesystem, &abs_mountpoint, &config).context("failed to mount")?;
 
-    if !foreground {
+    if !opts.foreground {
         use daemonize::{Daemonize, Stdio};
         Daemonize::new()
             .working_directory("/")
@@ -458,28 +519,18 @@ fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
     Ok(status)
 }
 
-// Kernel id of the FUSE connection behind one of coffer's own mounts, from
-// /proc/self/mountinfo: field 3 is the filesystem's `major:minor`, and the
-// minor is what /sys/fs/fuse/connections/<id> is named after. Deliberately
-// not stat()-based: stat on a FUSE mountpoint is itself a FUSE request,
-// which blocks for good if the daemon behind it is wedged - precisely the
-// situation `umount` gets reached for. For the same reason only the
-// mountpoint's *parent* is canonicalized (symlinks resolved); the last path
-// component is compared by name. Restricted to coffer's own mounts (source
-// "coffer") so `coffer umount` pointed at somebody else's FUSE mount never
-// aborts that.
-fn fuse_connection_id(mountpoint: &Path) -> Option<u32> {
-    let name = mountpoint.file_name()?;
-    let parent = match mountpoint.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
+// Every one of coffer's own FUSE mounts currently visible, as (mountpoint,
+// connection id), from /proc/self/mountinfo: field 3 is the filesystem's
+// `major:minor`, and the minor is what /sys/fs/fuse/connections/<id> is
+// named after. Restricted to coffer's own mounts (source "coffer") so
+// `coffer umount` pointed at somebody else's FUSE mount never aborts that.
+// In mount-table order: for a path mounted over more than once, the entry
+// listed last is the one currently visible there.
+fn coffer_mounts() -> Vec<(String, u32)> {
+    let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return Vec::new();
     };
-    let target = parent.canonicalize().ok()?.join(name);
-    let target = target.to_str()?;
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    // Last match wins: if the path is mounted over more than once, the
-    // entry listed last is the one currently visible there.
-    let mut found = None;
+    let mut found = Vec::new();
     for line in mountinfo.lines() {
         // mount-id parent-id major:minor root mountpoint options [tags] - fstype source superopts
         let mut fields = line.split(' ');
@@ -499,14 +550,40 @@ fn fuse_connection_id(mountpoint: &Path) -> Option<u32> {
         // source ("coffer"); only a `subtype=` option would make the type
         // itself read "fuse.coffer", so accept both spellings.
         let ours = (fstype == "fuse" || fstype.starts_with("fuse.")) && source == "coffer";
-        if !ours || unescape_mountinfo(mp) != target {
+        if !ours {
             continue;
         }
         if let Some(minor) = devnum.split(':').nth(1).and_then(|m| m.parse().ok()) {
-            found = Some(minor);
+            found.push((unescape_mountinfo(mp), minor));
         }
     }
     found
+}
+
+// The form a mountpoint takes in mountinfo, for matching against
+// coffer_mounts(). Deliberately not stat()-based: stat on a FUSE mountpoint
+// is itself a FUSE request, which blocks for good if the daemon behind it
+// is wedged - precisely the situation `umount` gets reached for. So only
+// the mountpoint's *parent* is canonicalized (symlinks resolved); the last
+// path component is compared by name.
+fn mount_key(mountpoint: &Path) -> Option<String> {
+    let name = mountpoint.file_name()?;
+    let parent = match mountpoint.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    Some(parent.canonicalize().ok()?.join(name).to_str()?.to_string())
+}
+
+// Kernel id of the FUSE connection behind one of coffer's own mounts; last
+// match wins (see coffer_mounts).
+fn fuse_connection_id(mountpoint: &Path) -> Option<u32> {
+    let target = mount_key(mountpoint)?;
+    coffer_mounts().into_iter().filter(|(mp, _)| *mp == target).map(|(_, id)| id).last()
+}
+
+fn is_mounted(mountpoint: &Path, mounts: &[(String, u32)]) -> bool {
+    mount_key(mountpoint).is_some_and(|target| mounts.iter().any(|(mp, _)| *mp == target))
 }
 
 // mountinfo escapes space, tab, newline and backslash in paths as \040,
@@ -552,10 +629,39 @@ network filesystem). To force it:\n    echo 1 > {abort}",
     }
 }
 
-fn cmd_umount(mountpoint: &Path) -> Result<()> {
-    let status = run_unmount(mountpoint)?;
+fn cmd_umount(target: Option<&str>) -> Result<()> {
+    let mountpoint = match target {
+        // A path needs no registry at all - so a broken config file can
+        // never get in the way of unmounting something by path.
+        Some(t) if looks_like_path(t) => PathBuf::from(t),
+        Some(t) => match Config::load()?.get(t)? {
+            Some(vault) => {
+                if !is_mounted(&vault.mountpoint, &coffer_mounts()) {
+                    bail!("'{}' is not mounted (its mountpoint is {})", vault.alias, vault.mountpoint.display());
+                }
+                println!("coffer: unmounting '{}' at {}", vault.alias, vault.mountpoint.display());
+                vault.mountpoint
+            }
+            None => PathBuf::from(t),
+        },
+        None => {
+            let vaults = Config::load()?.vaults()?;
+            if vaults.is_empty() {
+                bail!("no vaults registered (see `coffer add`) - give the mountpoint: coffer umount <mountpoint>");
+            }
+            let mounts = coffer_mounts();
+            let mounted: Vec<Vault> = vaults.into_iter().filter(|v| is_mounted(&v.mountpoint, &mounts)).collect();
+            if mounted.is_empty() {
+                bail!("none of the registered vaults is currently mounted (see `coffer list`)");
+            }
+            let vault = pick_vault(mounted, "umount")?;
+            println!("coffer: unmounting '{}' at {}", vault.alias, vault.mountpoint.display());
+            vault.mountpoint
+        }
+    };
+    let status = run_unmount(&mountpoint)?;
     if !status.success() {
-        hint_sudo_umount(mountpoint);
+        hint_sudo_umount(&mountpoint);
     }
     std::process::exit(status.code().unwrap_or(1));
 }
@@ -581,6 +687,262 @@ fn which(name: &str) -> Option<PathBuf> {
             .map(|dir| dir.join(name))
             .find(|p| p.is_file())
     })
+}
+
+// ---- the vault registry (~/.coffer/config) ----------------------------------
+
+// Rule for every positional that accepts "a container or an alias": a bare
+// word (no '/', not starting with '.' or '~') is looked up as an alias first;
+// anything else is a path, so `./work` always means the file even if an
+// alias `work` exists.
+fn looks_like_path(arg: &str) -> bool {
+    arg.contains('/') || arg.starts_with('.') || arg.starts_with('~')
+}
+
+/// For the commands that just take "a container": a registered alias
+/// resolves to its file, anything else is the path as given.
+fn resolve_container(arg: &str) -> Result<PathBuf> {
+    if looks_like_path(arg) {
+        return Ok(PathBuf::from(arg));
+    }
+    if let Some(vault) = Config::load()?.get(arg)? {
+        return Ok(vault.file);
+    }
+    let path = PathBuf::from(arg);
+    if !path.exists() {
+        bail!("{arg}: no such file, and no registered vault by that alias (see `coffer list`)");
+    }
+    Ok(path)
+}
+
+/// Works out what `mount` was asked to mount: nothing at all (the registry
+/// decides), an alias (optionally with a mountpoint override), or the
+/// classic file + mountpoint pair, which never touches the registry.
+fn plan_mount(target: Option<&str>, mountpoint: Option<PathBuf>, opts: MountOpts) -> Result<(PathBuf, PathBuf, MountOpts)> {
+    let registered = match target {
+        Some(t) if looks_like_path(t) => None,
+        Some(t) => Config::load()?.get(t)?,
+        None => {
+            let vaults = Config::load()?.vaults()?;
+            if vaults.is_empty() {
+                bail!(
+                    "no vaults registered yet. Either give the paths:\n    coffer mount <file> <mountpoint>\n\
+add --save <alias> to that to register them, or register without mounting:\n    coffer add <alias> <file> <mountpoint>"
+                );
+            }
+            Some(pick_vault(vaults, "mount")?)
+        }
+    };
+    match (registered, target, mountpoint) {
+        (Some(vault), _, mountpoint) => {
+            let mountpoint = mountpoint.unwrap_or_else(|| vault.mountpoint.clone());
+            let opts = opts.with_defaults_from(&vault);
+            Ok((vault.file, mountpoint, opts))
+        }
+        (None, Some(file), Some(mountpoint)) => Ok((PathBuf::from(file), mountpoint, opts)),
+        (None, Some(t), None) => bail!(
+            "{t}: not a registered vault (see `coffer list`). To mount a container file, give its \
+mountpoint too:\n    coffer mount {t} <mountpoint>"
+        ),
+        (None, None, _) => unreachable!("a missing target always resolves to a vault or an error above"),
+    }
+}
+
+/// One candidate needs no asking. Several do: a numbered menu when there's
+/// a terminal to ask on, an error pointing at the alias form otherwise.
+fn pick_vault(mut candidates: Vec<Vault>, verb: &str) -> Result<Vault> {
+    use std::io::{IsTerminal, Write};
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "{} registered vaults and no terminal to choose on - say which one: coffer {verb} <alias> \
+(see `coffer list`)",
+            candidates.len()
+        );
+    }
+    let mounts = coffer_mounts();
+    println!("Registered vaults:");
+    print_vault_table(&candidates, &mounts, true);
+    let question = if verb == "umount" { "Unmount" } else { "Mount" };
+    loop {
+        print!("\n{question} which one? [1-{}, or an alias; empty to abort] ", candidates.len());
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            bail!("aborted");
+        }
+        let answer = line.trim();
+        if answer.is_empty() || answer == "q" {
+            bail!("aborted");
+        }
+        if let Ok(n) = answer.parse::<usize>() {
+            if (1..=candidates.len()).contains(&n) {
+                return Ok(candidates.swap_remove(n - 1));
+            }
+        }
+        if let Some(i) = candidates.iter().position(|v| v.alias == answer) {
+            return Ok(candidates.swap_remove(i));
+        }
+        eprintln!("coffer: {answer:?} is neither a number from 1 to {} nor an alias", candidates.len());
+    }
+}
+
+fn print_vault_table(vaults: &[Vault], mounts: &[(String, u32)], numbered: bool) {
+    let mut header: Vec<String> =
+        ["ALIAS", "MOUNTPOINT", "FILE", "SIZE", "MODIFIED", "STATUS"].iter().map(|h| h.to_string()).collect();
+    if numbered {
+        header.insert(0, String::new());
+    }
+    let mut rows = Vec::new();
+    for (i, v) in vaults.iter().enumerate() {
+        // Size and mtime come from the file itself, no password needed -
+        // the creation date lives inside the container, behind the key.
+        let (size, modified, missing) = match std::fs::metadata(&v.file) {
+            Ok(m) => (
+                human_size(m.len()),
+                m.modified().map(format_local_time).unwrap_or_else(|_| "-".to_string()),
+                false,
+            ),
+            Err(_) => ("-".to_string(), "-".to_string(), true),
+        };
+        let status = if is_mounted(&v.mountpoint, mounts) {
+            "mounted"
+        } else if missing {
+            "file missing"
+        } else {
+            "-"
+        };
+        let mut row = vec![
+            v.alias.clone(),
+            config::abbreviate_home(&v.mountpoint),
+            config::abbreviate_home(&v.file),
+            size,
+            modified,
+            status.to_string(),
+        ];
+        if numbered {
+            row.insert(0, format!("{})", i + 1));
+        }
+        rows.push(row);
+    }
+    print_table(&header, &rows);
+}
+
+fn print_table(header: &[String], rows: &[Vec<String>]) {
+    let mut widths = vec![0usize; header.len()];
+    for row in std::iter::once(header).chain(rows.iter().map(Vec::as_slice)) {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    for row in std::iter::once(header).chain(rows.iter().map(Vec::as_slice)) {
+        let cells: Vec<String> = row.iter().enumerate().map(|(i, c)| format!("{c:<w$}", w = widths[i])).collect();
+        println!("{}", cells.join("  ").trim_end());
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+// Local time via libc rather than pulling in a date crate for one column.
+fn format_local_time(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r only writes into the `tm` we hand it, and both
+    // pointers are to live locals.
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return "-".to_string();
+    }
+    let mut buf = [0 as libc::c_char; 32];
+    // SAFETY: strftime writes at most `buf.len()` bytes into `buf` and
+    // reads only the NUL-terminated format and the initialized `tm`.
+    let n = unsafe { libc::strftime(buf.as_mut_ptr(), buf.len(), c"%Y-%m-%d %H:%M".as_ptr(), &tm) };
+    let bytes: Vec<u8> = buf[..n].iter().map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Registers (or re-registers) a vault. The container has to exist already:
+/// that's what makes a typo in its path fail right here instead of at the
+/// next `coffer mount`. The mountpoint needn't - mount creates it.
+fn cmd_add(cfg: &mut Config, mut vault: Vault) -> Result<()> {
+    config::validate_alias(&vault.alias)?;
+    if !vault.file.is_file() {
+        bail!("{}: no such file", vault.file.display());
+    }
+    // Stored absolute (but with symlinks left alone, so a link that gets
+    // re-pointed later still works), since the registry is used from any
+    // working directory.
+    vault.file = std::path::absolute(&vault.file)?;
+    vault.mountpoint = std::path::absolute(&vault.mountpoint)?;
+    if let Some(pw) = &vault.password_file {
+        vault.password_file = Some(std::path::absolute(pw)?);
+    }
+    // Same validation the flags get at mount time, so a bad value fails
+    // once here rather than at every later mount.
+    if let Some(d) = &vault.idle_timeout {
+        parse_duration(d).context("--idle-timeout")?;
+    }
+    if let Some(d) = &vault.compact_on_idle {
+        parse_duration(d).context("--compact-on-idle")?;
+    }
+    let replaced = cfg.upsert(&vault);
+    cfg.save()?;
+    println!(
+        "coffer: {} '{}' in {}: {} at {}",
+        if replaced { "updated" } else { "registered" },
+        vault.alias,
+        config::abbreviate_home(&cfg.path),
+        config::abbreviate_home(&vault.file),
+        config::abbreviate_home(&vault.mountpoint)
+    );
+    Ok(())
+}
+
+fn cmd_remove(cfg: &mut Config, alias: &str) -> Result<()> {
+    // Looked up leniently: a section too broken to parse is exactly the
+    // kind of entry someone would want to remove.
+    let file = cfg.get(alias).ok().flatten().map(|v| v.file);
+    if !cfg.remove(alias) {
+        bail!("no registered vault named '{alias}' (see `coffer list`)");
+    }
+    cfg.save()?;
+    match file {
+        Some(file) => println!(
+            "coffer: removed '{alias}' from {} ({} itself is untouched)",
+            config::abbreviate_home(&cfg.path),
+            config::abbreviate_home(&file)
+        ),
+        None => println!("coffer: removed '{alias}' from {}", config::abbreviate_home(&cfg.path)),
+    }
+    Ok(())
+}
+
+fn cmd_list(cfg: &Config) -> Result<()> {
+    let vaults = cfg.vaults()?;
+    if vaults.is_empty() {
+        println!("coffer: no vaults registered in {}", config::abbreviate_home(&cfg.path));
+        println!("Register one with:\n    coffer add <alias> <file> <mountpoint>\nor while mounting:\n    coffer mount <file> <mountpoint> --save <alias>");
+        return Ok(());
+    }
+    print_vault_table(&vaults, &coffer_mounts(), false);
+    Ok(())
 }
 
 fn cmd_check(file: &Path, password_file: Option<&Path>) -> Result<()> {
@@ -755,27 +1117,56 @@ fn cmd_completions(shell: clap_complete::Shell) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Create { file, max_size, password_file } => {
-            cmd_create(&file, max_size, password_file.as_deref())
+        Cmd::Create { file, max_size, password_file, save, mountpoint } => {
+            // Alias and config are checked up front: a bad alias or an
+            // unreadable config shouldn't surface only after the container
+            // has already been created.
+            let mut cfg = match &save {
+                Some(alias) => {
+                    config::validate_alias(alias)?;
+                    Some(Config::load()?)
+                }
+                None => None,
+            };
+            cmd_create(&file, max_size, password_file.as_deref())?;
+            if let (Some(alias), Some(cfg)) = (save, cfg.as_mut()) {
+                let mountpoint = mountpoint.expect("clap: --save requires --mountpoint");
+                cmd_add(cfg, Vault { alias, file, mountpoint, idle_timeout: None, compact_on_idle: None, password_file: None })?;
+            }
+            Ok(())
         }
-        Cmd::Mount { file, mountpoint, foreground, idle_timeout, compact_on_idle, password_file } => {
-            cmd_mount(
-                &file,
-                &mountpoint,
-                foreground,
-                idle_timeout,
-                compact_on_idle,
-                password_file.as_deref(),
-            )
+        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file } => {
+            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file };
+            let (file, mountpoint, opts) = plan_mount(target.as_deref(), mountpoint, opts)?;
+            if let Some(alias) = save {
+                let vault = Vault {
+                    alias,
+                    file: file.clone(),
+                    mountpoint: mountpoint.clone(),
+                    idle_timeout: opts.idle_timeout.clone(),
+                    compact_on_idle: opts.compact_on_idle.clone(),
+                    password_file: opts.password_file.clone(),
+                };
+                cmd_add(&mut Config::load()?, vault)?;
+            }
+            cmd_mount(&file, &mountpoint, opts)
         }
-        Cmd::Umount { mountpoint } => cmd_umount(&mountpoint),
-        Cmd::Check { file, password_file } => cmd_check(&file, password_file.as_deref()),
-        Cmd::Backup { file, dest, password_file } => cmd_backup(&file, &dest, password_file.as_deref()),
+        Cmd::Umount { target } => cmd_umount(target.as_deref()),
+        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file } => {
+            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file };
+            cmd_add(&mut Config::load()?, vault)
+        }
+        Cmd::Remove { alias } => cmd_remove(&mut Config::load()?, &alias),
+        Cmd::List => cmd_list(&Config::load()?),
+        Cmd::Check { file, password_file } => cmd_check(&resolve_container(&file)?, password_file.as_deref()),
+        Cmd::Backup { file, dest, password_file } => {
+            cmd_backup(&resolve_container(&file)?, &dest, password_file.as_deref())
+        }
         Cmd::Passwd { file, password_file, new_password_file } => {
-            cmd_passwd(&file, password_file.as_deref(), new_password_file.as_deref())
+            cmd_passwd(&resolve_container(&file)?, password_file.as_deref(), new_password_file.as_deref())
         }
-        Cmd::Info { file, password_file } => cmd_info(&file, password_file.as_deref()),
-        Cmd::Compact { file, password_file } => cmd_compact(&file, password_file.as_deref()),
+        Cmd::Info { file, password_file } => cmd_info(&resolve_container(&file)?, password_file.as_deref()),
+        Cmd::Compact { file, password_file } => cmd_compact(&resolve_container(&file)?, password_file.as_deref()),
         Cmd::Completions { shell } => {
             cmd_completions(shell);
             Ok(())

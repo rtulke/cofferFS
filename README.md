@@ -13,6 +13,11 @@ cp -r ~/Documents/secret-stuff ~/vault/
 coffer umount ~/vault
 ```
 
+Register that file/mountpoint pair once under an alias (`--save work` on the
+mount above, or `coffer add work vault.coffer ~/vault`) and from then on it's
+just `coffer mount` and `coffer umount` - no paths, and a numbered menu if
+you have several. See **Registered vaults** below.
+
 `coffer --version` prints the package version *and* the exact git commit
 it was built from, so two installs claiming the same version number can
 still be told apart.
@@ -144,13 +149,21 @@ coffer create vault.coffer --max-size 20G     # optional hard ceiling
 coffer mount  vault.coffer ~/vault
 coffer umount ~/vault
 
+# Remember the pair as "work" (~/.coffer/config) so the paths are never typed again
+coffer mount  vault.coffer ~/vault --save work   # ...or: coffer add work vault.coffer ~/vault
+coffer mount  work                               # by alias - also for info/check/backup/passwd/compact
+coffer mount                                     # the only registered vault, or a menu to pick from
+coffer umount                                    # the only mounted registered vault, or a menu
+coffer list                                      # all registered vaults + whether they're mounted
+coffer remove work                               # forget the alias (the container file stays)
+
 # Auto-unmount after being idle for a while (no fixed default - opt in)
 coffer mount  vault.coffer ~/vault --idle-timeout 30m
 
 # Auto-compact after being idle, but only if there's real space to reclaim
 coffer mount  vault.coffer ~/vault --compact-on-idle 1h
 
-# Maintenance
+# Maintenance (an alias works in place of the file everywhere below)
 coffer info    vault.coffer      # file/dir counts, size on disk vs. logical data
 coffer check   vault.coffer      # read-only integrity check (HMAC + structural)
 coffer backup  vault.coffer vault.bak.coffer   # consistent copy, safe while mounted
@@ -167,6 +180,72 @@ coffer mount vault.coffer ~/vault --password-file ~/.coffer-pw
 # directories aren't on the search path:
 coffer completions bash > ~/.local/share/bash-completion/completions/coffer
 ```
+
+## Registered vaults (`~/.coffer/config`)
+
+Typing the container path and the mountpoint on every mount gets old fast,
+so `coffer` keeps a small per-user registry of file/mountpoint pairs, each
+under an alias. Register a vault in whichever way fits the moment:
+
+```bash
+coffer add work ~/.coffer/work.coffer ~/vault        # register without mounting
+coffer mount ~/.coffer/work.coffer ~/vault --save work   # register while mounting
+coffer create ~/.coffer/work.coffer --save work --mountpoint ~/vault   # register while creating
+```
+
+From then on the alias stands in for the file (and, for `mount`/`umount`,
+the mountpoint too):
+
+```bash
+coffer mount work
+coffer umount work
+coffer info work          # same for check, backup, passwd, compact
+```
+
+And with no argument at all, `coffer mount` and `coffer umount` do the
+obvious thing: if exactly one vault is registered, `mount` mounts it; if
+exactly one registered vault is currently mounted, `umount` unmounts it.
+With several to choose from you get a numbered menu - alias, mountpoint,
+file, size on disk, last modified, and whether it's mounted right now -
+and type the number (or the alias). If there's no terminal to ask on (a
+script, a cron job), that's an error telling you to name the alias instead,
+never a guess.
+
+`coffer list` prints the same table without asking anything, and `coffer
+remove work` forgets an alias without touching the container file. Options
+given to `coffer add` or alongside `--save` (`--idle-timeout`,
+`--compact-on-idle`, `--password-file`) are stored with the entry and become
+that alias's defaults, so `coffer mount work` can mean "mount it and
+auto-unmount after 30 idle minutes" without repeating the flag - anything
+passed on the command line still wins over the stored value.
+
+The file itself is deliberately plain - one section per vault, the section
+name being the alias - and safe to edit by hand: comments on their own line
+survive `coffer add`/`remove`, and a leading `~` in a path means `$HOME`.
+
+```ini
+[work]
+file = /home/me/.coffer/work.coffer
+mountpoint = /home/me/vault
+idle_timeout = 30m
+
+[photos]
+file = /data/photos.coffer
+mountpoint = /media/photos
+```
+
+Two rules keep this predictable. An alias is a bare word (letters, digits,
+`-`, `_`, `.`, no leading `.` or `-`), so an argument containing a `/` or
+starting with `.` or `~` is always a path, never looked up - `./work` means
+the file even if an alias `work` exists. And a bare word that matches a
+registered alias is the alias; if it matches nothing, it's tried as a path.
+`coffer add` refuses a container file that doesn't exist (a typo should fail
+right there, not at the next mount), stores both paths absolute, and
+rewrites the file atomically with mode `0600` (a freshly created
+`~/.coffer` gets `0700`), since entries can name password files. A
+different location can be pointed at with `$COFFER_CONFIG`. A broken
+registry never gets in the way of the classic path-based forms: `coffer
+mount <file> <mountpoint>` and `coffer umount <mountpoint>` don't read it.
 
 ## NFS home directories
 
