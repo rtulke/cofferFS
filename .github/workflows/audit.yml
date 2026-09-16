@@ -1,0 +1,28 @@
+name: Audit
+
+# cargo-audit against the RustSec advisory database: on every push and
+# pull request that touches the dependency tree, and once a week
+# regardless - advisories for an unchanged Cargo.lock appear over time,
+# and the vendored SQLCipher/OpenSSL are exactly the crates where that
+# matters. Warnings (unmaintained, yanked) fail the job too, so a crate
+# going stale shows up here instead of in someone's bug report.
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml, Cargo.lock, .github/workflows/audit.yml]
+  pull_request:
+    branches: [main]
+    paths: [Cargo.toml, Cargo.lock, .github/workflows/audit.yml]
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit --deny warnings

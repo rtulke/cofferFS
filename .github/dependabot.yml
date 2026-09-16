@@ -1,0 +1,21 @@
+# Weekly pull requests for dependency updates. Cargo covers the whole
+# tree, including the vendored SQLCipher and OpenSSL that libsqlite3-sys
+# and openssl-src bundle - those are the two that carry the security
+# relevance, and they only move when the crate versions move. The Actions
+# entry keeps the checkout/upload/download actions current.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

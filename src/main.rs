@@ -328,6 +328,47 @@ fn redirect_std_to(f: &std::fs::File) -> Result<()> {
     Ok(())
 }
 
+/// The classic double fork into the background: the caller's shell gets
+/// its prompt back, the mount keeps running detached from the terminal
+/// and its session. stdin comes from /dev/null, stdout and stderr go to
+/// the log file if there is one, else to /dev/null. Hand-rolled rather
+/// than the `daemonize` crate, which is unmaintained (RUSTSEC-2025-0069)
+/// and did exactly this much.
+///
+/// Must run while the process is still single-threaded - it is called
+/// before the watcher threads are spawned, and that ordering is what makes
+/// fork() safe here. The parent halves leave through `_exit`, so no Rust
+/// destructor runs in them: dropping the FUSE session in a parent would
+/// unmount the filesystem the child is about to serve.
+fn daemonize(log: Option<&std::fs::File>) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: fork, setsid and umask are plain syscalls with no pointer
+    // arguments, called in a single-threaded process (see above).
+    unsafe {
+        match libc::fork() {
+            -1 => return Err(std::io::Error::last_os_error()).context("fork"),
+            0 => {}
+            _ => libc::_exit(0),
+        }
+        if libc::setsid() < 0 {
+            return Err(std::io::Error::last_os_error()).context("setsid");
+        }
+        match libc::fork() {
+            -1 => return Err(std::io::Error::last_os_error()).context("fork"),
+            0 => {}
+            _ => libc::_exit(0),
+        }
+        libc::umask(0o027);
+    }
+    std::env::set_current_dir("/").context("chdir /")?;
+    let devnull = std::fs::OpenOptions::new().read(true).write(true).open("/dev/null")?;
+    // SAFETY: both descriptors are valid for the whole call.
+    if unsafe { libc::dup2(devnull.as_raw_fd(), libc::STDIN_FILENO) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("redirecting stdin");
+    }
+    redirect_std_to(log.unwrap_or(&devnull))
+}
+
 /// One timestamped line on stderr - which, in a mount started with --log,
 /// is the log file.
 fn log_line(msg: &str) {
@@ -407,17 +448,7 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
     let session = fuser::Session::new(filesystem, &abs_mountpoint, &config).context("failed to mount")?;
 
     if !opts.foreground {
-        use daemonize::{Daemonize, Stdio};
-        let (out, err) = match &log_file {
-            Some(f) => (Stdio::from(f.try_clone()?), Stdio::from(f.try_clone()?)),
-            None => (Stdio::devnull(), Stdio::devnull()),
-        };
-        Daemonize::new()
-            .working_directory("/")
-            .stdout(out)
-            .stderr(err)
-            .start()
-            .context("failed to daemonize")?;
+        daemonize(log_file.as_ref())?;
     } else if let Some(f) = &log_file {
         redirect_std_to(f)?;
     }
