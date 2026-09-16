@@ -138,6 +138,9 @@ jobs:
       # /usr/lib/rpm/find-requires and emits exactly the versioned Requires:
       # that distro's packages carry, instead of its ldd-based fallback.
       # fuse3-devel sits in AppStream on EL9/EL10 - no CRB needed.
+      # --allowerasing: the EL images ship curl-minimal, which conflicts
+      # with the full curl package and makes a plain `dnf install curl`
+      # fail outright ("problem with installed package curl-minimal").
       - name: Install build prerequisites
         run: |
           if [ "${{ matrix.family }}" = zypper ]; then
@@ -145,17 +148,23 @@ jobs:
             zypper --non-interactive install --no-recommends \
               gcc make pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip
           else
-            dnf install -y --setopt=install_weak_deps=False \
+            dnf install -y --allowerasing --setopt=install_weak_deps=False \
               gcc make pkgconf-pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip
           fi
 
       - uses: actions/checkout@v7
 
+      # The openSUSE images set no PATH in their image config, and the runner
+      # builds a container step's PATH from that config plus $GITHUB_PATH -
+      # so adding only ~/.cargo/bin there leaves later steps with a PATH of
+      # exactly that one directory and `sh: executable file not found`.
+      # Prepending to the full PATH the shell actually has right now keeps
+      # the system directories in place on every image.
       - name: Install Rust
         run: |
           curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin:$PATH" >> "$GITHUB_PATH"
 
       # One .rpm per distro, natively, for the same libfuse3 SONAME reason as
       # the .deb side: EL9/EL10 and Fedora 43 are on fuse 3.10-3.16

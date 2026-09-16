@@ -47,7 +47,9 @@ declare -A TARGET_DIST=(
 # and emits exactly the versioned `Requires:` that distro's packages carry,
 # instead of falling back to its ldd-based approximation. fuse3-devel sits in
 # AppStream on EL9/EL10 (no CRB needed) and in the main repo elsewhere.
-DNF_INSTALL='dnf install -y --setopt=install_weak_deps=False \
+# --allowerasing: the EL images ship curl-minimal, which conflicts with the
+# full curl package and makes a plain `dnf install curl` fail outright.
+DNF_INSTALL='dnf install -y --allowerasing --setopt=install_weak_deps=False \
     gcc make pkgconf-pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip'
 ZYPPER_INSTALL='zypper --non-interactive --gpg-auto-import-keys refresh && \
     zypper --non-interactive install --no-recommends \
