@@ -14,7 +14,7 @@
 # "Source packages" workflow builds and smoke-tests this file on Fedora and
 # EL whenever it changes and on every release tag.
 
-%global commit dbbfbf50160a044b3193a6cb38aa63753c42d37b
+%global commit 4abade2a61e75a96be3a4142ecdd4705d6267d70
 %global shortcommit %(c=%{commit}; echo ${c:0:7})
 
 Name:           coffer

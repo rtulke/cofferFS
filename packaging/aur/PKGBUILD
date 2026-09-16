@@ -20,9 +20,9 @@ license=('MIT')
 # compiled from source and statically linked (perl is for OpenSSL's build).
 depends=('fuse3' 'gcc-libs' 'glibc')
 makedepends=('rust' 'perl')
-_commit=dbbfbf50160a044b3193a6cb38aa63753c42d37b
+_commit=4abade2a61e75a96be3a4142ecdd4705d6267d70
 source=("cofferFS-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('6c685606f62bd5d7b01ec6ab4239770c4a255c8c632d59d9e8edab7413ecd3da')
+sha256sums=('3eddb663ed7514b2b574be8b7fa7df43e212db574944f06b6db481d836ee7c0f')
 
 prepare() {
     cd "cofferFS-$pkgver"
