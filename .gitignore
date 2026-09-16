@@ -17,3 +17,4 @@ build.log
 /coffer-reference.py
 /requirements.txt
 /setup-python.sh
+*.rpm

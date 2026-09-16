@@ -2,6 +2,12 @@ name: Release
 
 # build+verify run on every push/PR to main so packaging breakage is caught
 # early; the release job only fires on an actual "vX.Y.Z" tag push.
+#
+# Two package families, each built natively per target distro (see the
+# comments on the build jobs for why there's no single universal package):
+#   .deb  - Debian 12/13, Ubuntu 24.04/26.04           (build / verify)
+#   .rpm  - Fedora 43/44, EL9/EL10, openSUSE Leap 16.0 and Tumbleweed
+#                                                      (build-rpm / verify-rpm)
 on:
   push:
     branches: [main]
@@ -12,6 +18,7 @@ on:
 
 env:
   CARGO_DEB_VERSION: "3.7.0"
+  CARGO_GENERATE_RPM_VERSION: "0.21.0"
 
 jobs:
   build:
@@ -87,6 +94,98 @@ jobs:
           path: ${{ env.DEB_PATH }}
           if-no-files-found: error
 
+  build-rpm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: fedora43
+            image: fedora:43
+            dist: fc43
+            family: dnf
+          - id: fedora44
+            image: fedora:44
+            dist: fc44
+            family: dnf
+          # AlmaLinux stands in for the whole EL family (RHEL, Rocky, Alma,
+          # Oracle) - binary-compatible, and unlike rockylinux its official
+          # Docker Hub images cover both 9 and 10.
+          - id: el9
+            image: almalinux:9
+            dist: el9
+            family: dnf
+          - id: el10
+            image: almalinux:10
+            dist: el10
+            family: dnf
+          - id: leap160
+            image: opensuse/leap:16.0
+            dist: lp160
+            family: zypper
+          # Rolling release: a package built today matches today's
+          # Tumbleweed. The rolling "latest" prerelease (rebuilt on every
+          # push to main) is the one Tumbleweed users should grab; a tagged
+          # release's Tumbleweed RPM goes stale whenever libfuse3 bumps.
+          - id: tumbleweed
+            image: opensuse/tumbleweed
+            dist: tw
+            family: zypper
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      # Same story as the .deb build: git first, for actions/checkout. rpm-build
+      # so cargo-generate-rpm's default auto-req finds the distro's own
+      # /usr/lib/rpm/find-requires and emits exactly the versioned Requires:
+      # that distro's packages carry, instead of its ldd-based fallback.
+      # fuse3-devel sits in AppStream on EL9/EL10 - no CRB needed.
+      - name: Install build prerequisites
+        run: |
+          if [ "${{ matrix.family }}" = zypper ]; then
+            zypper --non-interactive --gpg-auto-import-keys refresh
+            zypper --non-interactive install --no-recommends \
+              gcc make pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip
+          else
+            dnf install -y --setopt=install_weak_deps=False \
+              gcc make pkgconf-pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip
+          fi
+
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # One .rpm per distro, natively, for the same libfuse3 SONAME reason as
+      # the .deb side: EL9/EL10 and Fedora 43 are on fuse 3.10-3.16
+      # (libfuse3.so.3), Fedora 44 and Tumbleweed on 3.18 (libfuse3.so.4).
+      # Building natively means each package's auto-discovered Requires:
+      # simply names whatever that distro actually ships.
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked --version "$CARGO_GENERATE_RPM_VERSION"
+
+      - name: Build man page
+        run: make man
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build shell completions
+        run: make completions
+
+      # The dist tag goes into the Release field, the way distro packages
+      # themselves are named (coffer-0.1.0-1.fc44.x86_64.rpm) - no rename
+      # step needed, unlike the .deb side.
+      - name: Build .rpm
+        run: cargo generate-rpm --set-metadata 'release = "1.${{ matrix.dist }}"'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rpm-${{ matrix.id }}
+          path: target/generate-rpm/*.rpm
+          if-no-files-found: error
+
   verify:
     needs: build
     strategy:
@@ -152,11 +251,85 @@ jobs:
               printf "testpass\n" | coffer check /root/vault.coffer
             '
 
+  verify-rpm:
+    needs: build-rpm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: fedora43
+            image: fedora:43
+            family: dnf
+          - id: fedora44
+            image: fedora:44
+            family: dnf
+          - id: el9
+            image: almalinux:9
+            family: dnf
+          - id: el10
+            image: almalinux:10
+            family: dnf
+          - id: leap160
+            image: opensuse/leap:16.0
+            family: zypper
+          - id: tumbleweed
+            image: opensuse/tumbleweed
+            family: zypper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: rpm-${{ matrix.id }}
+
+      # Same docker flags and the same functional cycle as the .deb verify
+      # job above (see there for why each flag is needed). A real `dnf
+      # install` / `zypper install` of the local file, so the auto-discovered
+      # Requires: (libfuse3.so.N, glibc symbol versions) and the explicit
+      # fuse3 dependency actually have to resolve against this distro's
+      # repos. zypper additionally needs --allow-unsigned-rpm since the
+      # packages aren't GPG-signed; dnf accepts unsigned local files as is.
+      #
+      # The man page is checked via the package manifest, not the
+      # filesystem: Fedora/EL/openSUSE container images install with
+      # tsflags=nodocs, so %doc files legitimately never land on disk there
+      # even though the package correctly ships and declares them.
+      - name: Install and smoke-test the package the same way an end user would
+        run: |
+          docker run --rm \
+            --cap-add SYS_ADMIN --device /dev/fuse \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            -v "$PWD:/work:ro" \
+            -e FAMILY=${{ matrix.family }} \
+            ${{ matrix.image }} \
+            bash -euxc '
+              if [ "$FAMILY" = zypper ]; then
+                zypper --non-interactive --gpg-auto-import-keys refresh
+                zypper --non-interactive install --allow-unsigned-rpm /work/coffer-*.rpm
+              else
+                dnf install -y /work/coffer-*.rpm
+              fi
+              rpm -q coffer
+              rpm -ql coffer | grep -qx /usr/share/man/man1/coffer.1.gz
+              test -f /usr/share/bash-completion/completions/coffer
+              coffer --version
+
+              mkdir -p /root/mnt
+              printf "testpass\ntestpass\n" | coffer create /root/vault.coffer
+              printf "testpass\n" | coffer mount /root/vault.coffer /root/mnt --foreground &
+              MOUNT_PID=$!
+              sleep 1
+              echo "hello from CI" > /root/mnt/f.txt
+              grep -q "hello from CI" /root/mnt/f.txt
+              fusermount3 -u /root/mnt
+              wait "$MOUNT_PID" 2>/dev/null || true
+              printf "testpass\n" | coffer check /root/vault.coffer
+            '
+
   release:
-    needs: verify
+    needs: [verify, verify-rpm]
     # Tag pushes (vX.Y.Z) publish a proper, stable release. Pushes to main
     # additionally republish a single rolling "latest" prerelease so a
-    # built .deb is always available between tagged versions - see the
+    # built package is always available between tagged versions - see the
     # "Determine release identity" step for how the two are told apart.
     if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -171,16 +344,17 @@ jobs:
       - name: Determine release identity
         id: rel
         run: |
+          PKGS="one .deb per Debian/Ubuntu target (12/13, 24.04/26.04) and one .rpm per Fedora (43/44), EL (9/10) and openSUSE (Leap 16.0, Tumbleweed) target, see SHA256SUMS"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "title=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "notes=coffer $GITHUB_REF_NAME - one .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" >> "$GITHUB_OUTPUT"
+            echo "notes=coffer $GITHUB_REF_NAME - $PKGS" >> "$GITHUB_OUTPUT"
           else
             echo "tag=latest" >> "$GITHUB_OUTPUT"
             echo "title=coffer (main, rolling build)" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "notes=Rolling build of main@${GITHUB_SHA::7} - not a stable release, see the tagged vX.Y.Z releases for that. One .deb per target distro (Debian 12/13, Ubuntu 24.04/26.04), see SHA256SUMS" >> "$GITHUB_OUTPUT"
+            echo "notes=Rolling build of main@${GITHUB_SHA::7} - not a stable release, see the tagged vX.Y.Z releases for that. $PKGS" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create or update the GitHub Release
@@ -188,7 +362,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd artifacts
-          sha256sum *.deb > SHA256SUMS
+          sha256sum *.deb *.rpm > SHA256SUMS
           TAG="${{ steps.rel.outputs.tag }}"
           PRERELEASE_FLAG=""
           [[ "${{ steps.rel.outputs.prerelease }}" == "true" ]] && PRERELEASE_FLAG="--prerelease"

@@ -47,3 +47,26 @@ assets = [
     ["target/completions/_coffer", "usr/share/zsh/site-functions/_coffer", "644"],
     ["target/completions/coffer.fish", "usr/share/fish/vendor_completions.d/coffer.fish", "644"],
 ]
+
+# RPM counterpart of the cargo-deb block above, consumed by cargo-generate-rpm
+# (packaging/build-rpm.sh and the release workflow). Same asset list; the
+# dist tag (.fc44, .el9, .lp160, ...) is not set here but injected per build
+# via `--set-metadata 'release = "1.<dist>"'`, since one RPM is built
+# natively per target distro - same libfuse3 SONAME reasoning as for the
+# .deb packages, see packaging/build-deb.sh.
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/coffer", dest = "/usr/bin/coffer", mode = "755" },
+    { source = "target/man/coffer.1.gz", dest = "/usr/share/man/man1/coffer.1.gz", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/coffer/README.md", mode = "644", doc = true },
+    { source = "target/completions/coffer.bash", dest = "/usr/share/bash-completion/completions/coffer", mode = "644" },
+    { source = "target/completions/_coffer", dest = "/usr/share/zsh/site-functions/_coffer", mode = "644" },
+    { source = "target/completions/coffer.fish", dest = "/usr/share/fish/vendor_completions.d/coffer.fish", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+# The fusermount3 helper that mount/umount shell out to. It lives in the
+# `fuse3` package on Fedora, EL and openSUSE alike, separate from the
+# libfuse3 shared library that automatic dependency discovery picks up on
+# its own - `ldd` only sees the linked library, not the subprocess.
+fuse3 = "*"

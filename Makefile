@@ -1,6 +1,7 @@
 PREFIX ?= /usr/local
-# packaging/build-deb.sh sets this per-distro to keep each container's build
-# isolated; `?=` picks it up from the environment automatically when set.
+# packaging/build-deb.sh and build-rpm.sh set this per-distro to keep each
+# container's build isolated; `?=` picks it up from the environment
+# automatically when set.
 CARGO_TARGET_DIR ?= target
 
 .PHONY: build release debug man completions install uninstall clean test check-deps

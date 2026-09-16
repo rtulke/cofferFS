@@ -32,7 +32,19 @@ for why there's one per distro rather than a single universal package):
 sudo apt-get install ./coffer_*_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb
 ```
 
-Grab the matching `.deb` for your distro from the
+**Prebuilt `.rpm`** — likewise one per target: Fedora 43/44, Enterprise
+Linux 9/10 (RHEL, AlmaLinux, Rocky, Oracle), openSUSE Leap 16.0 and
+Tumbleweed. The dist tag in the file name says which is which:
+
+```bash
+sudo dnf install ./coffer-*-1.<fc43|fc44|el9|el10>.x86_64.rpm
+sudo zypper install --allow-unsigned-rpm ./coffer-*-1.<lp160|tw>.x86_64.rpm
+```
+
+Tumbleweed users should take the rolling `latest` prerelease rather than a
+tagged version - see **Packaging** below.
+
+Grab the matching package for your distro from the
 [Releases page](https://github.com/rtulke/cofferFS/releases), or build them
 all yourself (see **Packaging** below).
 
@@ -512,10 +524,29 @@ the Makefile) to `/usr/share/man/man1/`.
 
 ```bash
 packaging/build-deb.sh          # -> dist/coffer_*_<id>_amd64.deb (all 4)
+packaging/build-rpm.sh          # -> dist/coffer-*-1.<dist>.x86_64.rpm (all 6, see below)
 packaging/test-install.sh       # installs each into a matching fresh
                                  # container and runs a full create/mount/
                                  # write/read/umount/check cycle
 ```
+
+**RPM targets** (`packaging/build-rpm.sh`, via
+[cargo-generate-rpm](https://github.com/cat-in-136/cargo-generate-rpm))
+follow the exact same per-distro pattern: Fedora 43 and 44, Enterprise
+Linux 9 and 10 (built on AlmaLinux, binary-compatible with RHEL, Rocky and
+Oracle), openSUSE Leap 16.0 and Tumbleweed. The libfuse3 split runs
+through the RPM world just the same - EL9/EL10 and Fedora 43 are on fuse
+3.10-3.16 (`libfuse3.so.3`), Fedora 44 and Tumbleweed on 3.18
+(`libfuse3.so.4`) - so each RPM is built natively in its distro's own
+container and its automatically discovered `Requires:` name whatever that
+distro ships. The dist tag lands in the RPM `Release` field
+(`coffer-0.1.0-1.fc44.x86_64.rpm`), the way distro packages themselves are
+named. Tumbleweed being a rolling release, its RPM matches Tumbleweed as of
+the build - the rolling `latest` prerelease (rebuilt on every push to
+`main`) is the one to use there; a tagged release's Tumbleweed package goes
+stale the next time libfuse3 bumps. The RPMs are not GPG-signed, which
+`dnf` accepts for local files as is and `zypper` needs
+`--allow-unsigned-rpm` for.
 
 **Why per-distro and not one universal package:** the first attempt built a
 single `.deb` inside `debian:12-slim` (the oldest target) on the theory that
@@ -549,7 +580,10 @@ The only runtime dependencies are `libc6`, `libfuse3-3`/`libfuse3-4`
 it's a separate package from `libfuse3-N`, easy to miss since `ldd` only
 reports the linked *library*, not the subprocess dependency; this was also
 caught by `test-install.sh` actually exercising `mount`/`umount`, not just
-checking that install succeeds).
+checking that install succeeds). The RPMs carry the same split: `fuse3` is
+declared explicitly in `Cargo.toml`, the library (`fuse3-libs` on
+Fedora/EL, `libfuse3-3`/`libfuse3-4` on openSUSE) comes in through RPM's
+automatic dependency discovery at build time.
 
 All four packages pass the full `test-install.sh` cycle (install, create,
 mount, write, read, unmount, check). On the two SONAME-3 targets (Debian 12,
@@ -565,7 +599,7 @@ targets (Debian 13's 3.17.2, Ubuntu 26.04's 3.18.2).
 - `Cargo.toml` / `Cargo.lock` — dependencies and the `cargo-deb` packaging
   metadata
 - `Makefile` — `make build` / `make install` / `make man`
-- `packaging/` — the `coffer(1)` man page and the per-distro `.deb` build
-  scripts (see **Packaging** above)
-- `.github/workflows/release.yml` — builds a `.deb` per target distro and
-  publishes it to GitHub Releases
+- `packaging/` — the `coffer(1)` man page and the per-distro `.deb` and
+  `.rpm` build scripts (see **Packaging** above)
+- `.github/workflows/release.yml` — builds a `.deb` and an `.rpm` per target
+  distro, smoke-tests each one, and publishes them to GitHub Releases
