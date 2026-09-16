@@ -14,7 +14,7 @@
 # "Source packages" workflow builds and smoke-tests this file on Fedora and
 # EL whenever it changes and on every release tag.
 
-%global commit 4abade2a61e75a96be3a4142ecdd4705d6267d70
+%global commit d42a99f74636a34e420ccaae14f620cc8c27c7cb
 %global shortcommit %(c=%{commit}; echo ${c:0:7})
 # The release profile strips the binary (Cargo.toml), so find-debuginfo has
 # nothing to extract and EL's rpmbuild aborts on the empty debug source
@@ -22,7 +22,7 @@
 %global debug_package %{nil}
 
 Name:           coffer
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Growable, user-mountable encrypted single-file containers
 
@@ -49,8 +49,6 @@ SQLite's WAL journal.
 %autosetup -n cofferFS-%{version}
 
 %build
-# Both spellings: build.rs reads COFFER_GIT_HASH from 0.1.2 on, the 0.1.1
-# tarball only knows the GITHUB_SHA fallback.
 export COFFER_GIT_HASH=%{shortcommit}
 export GITHUB_SHA=%{commit}
 cargo build --release --locked
@@ -79,5 +77,9 @@ cargo test --release --locked
 %{_datadir}/fish/vendor_completions.d/coffer.fish
 
 %changelog
+* Wed Sep 17 2026 Robert Tulke <rt@debian.sh> - 0.1.2-1
+- Read-only mounts, mount logs, --password-command, hardened process,
+  VACUUM copy on disk, signed release checksums
+
 * Tue Sep 16 2026 Robert Tulke <rt@debian.sh> - 0.1.1-1
 - Initial package
