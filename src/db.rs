@@ -122,19 +122,29 @@ pub fn open_db(path: &Path, password: &str, readonly: bool) -> Result<Connection
         [],
         |r| r.get(0),
     );
-    if check.is_err() {
-        bail!("wrong password, or the file is not a coffer container");
+    let schema = match check {
+        Ok(v) => v,
+        Err(_) => bail!("wrong password, or the file is not a coffer container"),
+    };
+    // Compared, not just read: a container written by a newer coffer with
+    // a changed schema must be refused with a clear message, not opened
+    // and then mishandled (or silently written to) by this older one.
+    if schema != SCHEMA_VERSION {
+        bail!(
+            "{} uses container format version {schema}, this coffer understands version {SCHEMA_VERSION} - upgrade coffer",
+            path.display()
+        );
     }
 
     if !readonly {
-        // cache_size in KiB (negative = KiB rather than page count): keep far more
-        // decrypted pages hot than SQLite's tiny ~2MB default, since every page miss
-        // means SQLCipher has to re-decrypt+HMAC-verify that page on the next touch.
-        con.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; \
-             PRAGMA foreign_keys = OFF; PRAGMA cache_size = -131072;",
-        )?;
+        con.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF;")?;
     }
+    // cache_size in KiB (negative = KiB rather than page count): keep far more
+    // decrypted pages hot than SQLite's tiny ~2MB default, since every page miss
+    // means SQLCipher has to re-decrypt+HMAC-verify that page on the next touch.
+    // Applies to read-only connections too - a read-only mount reads just as
+    // much as a writable one.
+    con.execute_batch("PRAGMA cache_size = -131072;")?;
     con.set_prepared_statement_cache_capacity(64);
     Ok(con)
 }

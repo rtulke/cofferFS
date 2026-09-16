@@ -28,6 +28,9 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR DURATION ]
 .RB [ \-\-password\-file
 .IR FILE ]
+.RB [ \-\-read\-only ]
+.RB [ \-\-log
+.IR FILE ]
 .br
 .B coffer umount
 .RI [ mountpoint | alias ]
@@ -39,6 +42,8 @@ coffer \- growable, user-mountable encrypted single-file containers
 .RB [ \-\-compact\-on\-idle
 .IR DURATION ]
 .RB [ \-\-password\-file
+.IR FILE ]
+.RB [ \-\-log\-file
 .IR FILE ]
 .br
 .B coffer remove
@@ -180,7 +185,7 @@ would, so
 .I ALIAS
 works from then on.
 .TP
-.BI "mount [" file | alias " [" mountpoint "]] [\-\-save " ALIAS "] [\-\-foreground] [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION ]
+.BI "mount [" file | alias " [" mountpoint "]] [\-\-save " ALIAS "] [\-\-foreground] [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-read\-only] [\-\-log " FILE ]
 Mount
 .I file
 at
@@ -242,6 +247,39 @@ large container can be minutes. Off by default; prefer running
 .B compact
 manually while the mount is idle instead, for containers used
 interactively.
+.B \-\-read\-only
+(short
+.BR \-r ,
+also
+.BR \-\-ro )
+mounts the container read\-only: the file is opened read\-only, the
+kernel refuses every write with EROFS, and so does
+.B coffer
+itself. Handy for looking into a backup copy or an archive without any
+chance of touching it. Cannot be combined with
+.BR \-\-compact\-on\-idle .
+The container is still locked against a second
+.B mount
+or a concurrent
+.B passwd
+/
+.B compact
+for as long as it is mounted.
+.B \-\-log
+.I FILE
+(short
+.BR \-l )
+appends the mount's own messages \- mounted, unmounted, idle unmount,
+auto\-compact, and any error from those \- to
+.IR FILE ,
+each line timestamped. A daemonized mount otherwise has nowhere to print
+them (its output goes to
+.IR /dev/null ).
+The file is created with mode 0600. Stored with
+.B \-\-save
+or
+.BR add ,
+it becomes the alias's default.
 .TP
 .BI "umount [" mountpoint | alias ]
 Unmount a container previously mounted at
@@ -267,7 +305,7 @@ the mount daemon exits and releases the container's lock right away instead
 of lingering until the last holder lets go; anything that still had files
 open there gets I/O errors from then on.
 .TP
-.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE ]
+.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE "] [\-\-log\-file " FILE ]
 Register
 .I file
 (which must already exist) and
@@ -371,7 +409,7 @@ The per-user vault registry: one
 section per registered vault, with
 .BR file " and " mountpoint
 lines and optionally
-.BR idle_timeout ", " compact_on_idle " and " password_file
+.BR idle_timeout ", " compact_on_idle ", " password_file " and " log_file
 (same formats as the corresponding flags). Written atomically with mode
 0600 (a freshly created
 .I ~/.coffer

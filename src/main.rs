@@ -64,6 +64,15 @@ enum Cmd {
         /// Read the password from this file instead of prompting
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Mount read-only: the container is opened read-only and every
+        /// write is refused with EROFS (also: --ro)
+        #[arg(short = 'r', long, visible_alias = "ro")]
+        read_only: bool,
+        /// Append the mount's own messages (idle unmount, auto-compact,
+        /// errors) to FILE - a daemonized mount otherwise has nowhere to
+        /// print them
+        #[arg(short = 'l', long, value_name = "FILE")]
+        log: Option<PathBuf>,
     },
     /// Unmount a container
     Umount {
@@ -88,6 +97,9 @@ enum Cmd {
         /// Default --password-file for `coffer mount ALIAS`
         #[arg(long, value_name = "FILE")]
         password_file: Option<PathBuf>,
+        /// Default --log for `coffer mount ALIAS`
+        #[arg(long, value_name = "FILE")]
+        log_file: Option<PathBuf>,
     },
     /// Forget a registered alias (the container file itself is left untouched)
     Remove { alias: String },
@@ -267,6 +279,8 @@ struct MountOpts {
     idle_timeout: Option<String>,
     compact_on_idle: Option<String>,
     password_file: Option<PathBuf>,
+    read_only: bool,
+    log: Option<PathBuf>,
 }
 
 impl MountOpts {
@@ -274,14 +288,52 @@ impl MountOpts {
         self.idle_timeout = self.idle_timeout.or_else(|| vault.idle_timeout.clone());
         self.compact_on_idle = self.compact_on_idle.or_else(|| vault.compact_on_idle.clone());
         self.password_file = self.password_file.or_else(|| vault.password_file.clone());
+        self.log = self.log.or_else(|| vault.log_file.clone());
         self
     }
+}
+
+/// The mount's log, if one was asked for: appended to, created with mode
+/// 0600 (it can name container paths and, via error messages, mountpoints).
+fn open_log(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("opening log file {}", path.display()))
+}
+
+/// Points stdout and stderr at `f` (for a foreground mount with --log; the
+/// daemonized case hands the file to daemonize instead).
+fn redirect_std_to(f: &std::fs::File) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: both descriptors are valid for the whole call.
+        if unsafe { libc::dup2(f.as_raw_fd(), fd) } < 0 {
+            return Err(std::io::Error::last_os_error()).context("redirecting output to the log file");
+        }
+    }
+    Ok(())
+}
+
+/// One timestamped line on stderr - which, in a mount started with --log,
+/// is the log file.
+fn log_line(msg: &str) {
+    eprintln!("{} coffer: {msg}", strftime_local(std::time::SystemTime::now(), c"%Y-%m-%d %H:%M:%S"));
 }
 
 fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
     let idle_timeout = opts.idle_timeout.map(|s| parse_duration(&s)).transpose()?;
     let compact_on_idle = opts.compact_on_idle.map(|s| parse_duration(&s)).transpose()?;
+    if opts.read_only && compact_on_idle.is_some() {
+        bail!("--compact-on-idle needs a writable mount; drop it or --read-only");
+    }
     let abs_file = file.canonicalize().with_context(|| file.display().to_string())?;
+    // Opened before the password prompt, so an unwritable log path fails
+    // here rather than after the mount is already up.
+    let log_file = opts.log.as_deref().map(open_log).transpose()?;
 
     // Acquired before even opening the database: if some other coffer
     // process already has this container locked (mounted, or a passwd/
@@ -300,12 +352,17 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
     let abs_mountpoint = mountpoint.canonicalize()?;
 
     let password = read_password_source(opts.password_file.as_deref(), false)?;
-    let con = db::open_db(file, &password, false)?;
+    let con = db::open_db(file, &password, opts.read_only)?;
     let max_size = db::read_max_size(&con);
 
-    println!("coffer: mounting {} at {}", file.display(), mountpoint.display());
+    println!(
+        "coffer: mounting {} at {}{}",
+        file.display(),
+        mountpoint.display(),
+        if opts.read_only { " (read-only)" } else { "" }
+    );
 
-    let filesystem = fs::CofferFS::new(con, max_size, &abs_file);
+    let filesystem = fs::CofferFS::new(con, max_size, &abs_file, opts.read_only);
     // Grabbed before `filesystem` is moved into Session::new below - these
     // are just cloned Arc handles, independent of filesystem's ownership.
     let last_activity = filesystem.last_activity();
@@ -316,6 +373,11 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
         fuser::MountOption::NoDev,
         fuser::MountOption::NoSuid,
     ];
+    if opts.read_only {
+        // Kernel-enforced: writes never even reach the FUSE loop. fs.rs
+        // additionally refuses them itself, as a second line.
+        config.mount_options.push(fuser::MountOption::RO);
+    }
 
     // Session::new() performs the actual mount(2) and the FUSE handshake
     // synchronously and returns a Result - deliberately done here, in the
@@ -332,12 +394,26 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
 
     if !opts.foreground {
         use daemonize::{Daemonize, Stdio};
+        let (out, err) = match &log_file {
+            Some(f) => (Stdio::from(f.try_clone()?), Stdio::from(f.try_clone()?)),
+            None => (Stdio::devnull(), Stdio::devnull()),
+        };
         Daemonize::new()
             .working_directory("/")
-            .stdout(Stdio::devnull())
-            .stderr(Stdio::devnull())
+            .stdout(out)
+            .stderr(err)
             .start()
             .context("failed to daemonize")?;
+    } else if let Some(f) = &log_file {
+        redirect_std_to(f)?;
+    }
+    if log_file.is_some() {
+        log_line(&format!(
+            "mounted {} at {}{}",
+            abs_file.display(),
+            abs_mountpoint.display(),
+            if opts.read_only { " (read-only)" } else { "" }
+        ));
     }
 
     // Spawned only after daemonizing (when applicable): fork() does not
@@ -354,6 +430,9 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
     }
 
     session.run()?;
+    if log_file.is_some() {
+        log_line(&format!("unmounted {}", abs_mountpoint.display()));
+    }
     Ok(())
 }
 
@@ -368,18 +447,18 @@ fn spawn_idle_watcher(mountpoint: PathBuf, last_activity: Arc<AtomicU64>, timeou
         std::thread::sleep(poll);
         let idle_for = db::now_secs() - last_activity.load(Ordering::Relaxed) as f64;
         if idle_for >= timeout.as_secs_f64() {
-            eprintln!(
-                "coffer: idle for {}s (limit {}s), auto-unmounting {}",
+            log_line(&format!(
+                "idle for {}s (limit {}s), auto-unmounting {}",
                 idle_for as u64,
                 timeout.as_secs(),
                 mountpoint.display()
-            );
+            ));
             match run_unmount(&mountpoint) {
                 Ok(status) if !status.success() => {
-                    eprintln!("coffer: auto-unmount of {} failed: {status}", mountpoint.display());
+                    log_line(&format!("auto-unmount of {} failed: {status}", mountpoint.display()));
                 }
                 Err(e) => {
-                    eprintln!("coffer: auto-unmount of {} failed: {e}", mountpoint.display());
+                    log_line(&format!("auto-unmount of {} failed: {e}", mountpoint.display()));
                 }
                 Ok(_) => {}
             }
@@ -434,10 +513,10 @@ fn spawn_compact_on_idle_watcher(
         if gap < MIN_RECLAIM_BYTES || (gap as f64) < on_disk as f64 * MIN_RECLAIM_FRACTION {
             continue;
         }
-        eprintln!(
-            "coffer: idle with ~{gap} reclaimable bytes, compacting {}...",
+        log_line(&format!(
+            "idle with ~{gap} reclaimable bytes, compacting {}...",
             container_path.display()
-        );
+        ));
         // VACUUM alone doesn't shrink the main file under WAL mode - it
         // lands in the WAL first. A normal (non-idle-watcher) connection
         // gets this for free from SQLite's checkpoint-on-last-close, but
@@ -445,7 +524,7 @@ fn spawn_compact_on_idle_watcher(
         // checkpoint has to be forced explicitly or the main file's size on
         // disk never actually changes.
         if let Err(e) = guard.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);") {
-            eprintln!("coffer: auto-compact failed: {e}");
+            log_line(&format!("auto-compact failed: {e}"));
         }
     });
 }
@@ -860,6 +939,10 @@ fn human_size(bytes: u64) -> String {
 
 // Local time via libc rather than pulling in a date crate for one column.
 fn format_local_time(t: std::time::SystemTime) -> String {
+    strftime_local(t, c"%Y-%m-%d %H:%M")
+}
+
+fn strftime_local(t: std::time::SystemTime, fmt: &std::ffi::CStr) -> String {
     let secs = t
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as libc::time_t)
@@ -873,7 +956,7 @@ fn format_local_time(t: std::time::SystemTime) -> String {
     let mut buf = [0 as libc::c_char; 32];
     // SAFETY: strftime writes at most `buf.len()` bytes into `buf` and
     // reads only the NUL-terminated format and the initialized `tm`.
-    let n = unsafe { libc::strftime(buf.as_mut_ptr(), buf.len(), c"%Y-%m-%d %H:%M".as_ptr(), &tm) };
+    let n = unsafe { libc::strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &tm) };
     let bytes: Vec<u8> = buf[..n].iter().map(|&c| c as u8).collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -893,6 +976,9 @@ fn cmd_add(cfg: &mut Config, mut vault: Vault) -> Result<()> {
     vault.mountpoint = std::path::absolute(&vault.mountpoint)?;
     if let Some(pw) = &vault.password_file {
         vault.password_file = Some(std::path::absolute(pw)?);
+    }
+    if let Some(log) = &vault.log_file {
+        vault.log_file = Some(std::path::absolute(log)?);
     }
     // Same validation the flags get at mount time, so a bad value fails
     // once here rather than at every later mount.
@@ -1131,12 +1217,12 @@ fn main() -> Result<()> {
             cmd_create(&file, max_size, password_file.as_deref())?;
             if let (Some(alias), Some(cfg)) = (save, cfg.as_mut()) {
                 let mountpoint = mountpoint.expect("clap: --save requires --mountpoint");
-                cmd_add(cfg, Vault { alias, file, mountpoint, idle_timeout: None, compact_on_idle: None, password_file: None })?;
+                cmd_add(cfg, Vault { alias, file, mountpoint, idle_timeout: None, compact_on_idle: None, password_file: None, log_file: None })?;
             }
             Ok(())
         }
-        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file } => {
-            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file };
+        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file, read_only, log } => {
+            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file, read_only, log };
             let (file, mountpoint, opts) = plan_mount(target.as_deref(), mountpoint, opts)?;
             if let Some(alias) = save {
                 let vault = Vault {
@@ -1146,14 +1232,15 @@ fn main() -> Result<()> {
                     idle_timeout: opts.idle_timeout.clone(),
                     compact_on_idle: opts.compact_on_idle.clone(),
                     password_file: opts.password_file.clone(),
+                    log_file: opts.log.clone(),
                 };
                 cmd_add(&mut Config::load()?, vault)?;
             }
             cmd_mount(&file, &mountpoint, opts)
         }
         Cmd::Umount { target } => cmd_umount(target.as_deref()),
-        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file } => {
-            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file };
+        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file } => {
+            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file };
             cmd_add(&mut Config::load()?, vault)
         }
         Cmd::Remove { alias } => cmd_remove(&mut Config::load()?, &alias),

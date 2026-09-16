@@ -39,10 +39,11 @@ pub struct CofferFS {
     gid: u32,
     container_dir: PathBuf,
     last_activity: Arc<AtomicU64>,
+    read_only: bool,
 }
 
 impl CofferFS {
-    pub fn new(con: Connection, max_size: u64, container_path: &Path) -> Self {
+    pub fn new(con: Connection, max_size: u64, container_path: &Path, read_only: bool) -> Self {
         CofferFS {
             con: Arc::new(Mutex::new(con)),
             max_size,
@@ -54,6 +55,7 @@ impl CofferFS {
                 .unwrap_or(Path::new("."))
                 .to_path_buf(),
             last_activity: Arc::new(AtomicU64::new(db::now_secs() as u64)),
+            read_only,
         }
     }
 
@@ -294,6 +296,10 @@ impl Filesystem for CofferFS {
         reply: ReplyAttr,
     ) {
         self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
         let mut con = self.con.lock().unwrap();
         let tx = match con.transaction() {
             Ok(t) => t,
@@ -389,6 +395,10 @@ impl Filesystem for CofferFS {
         reply: ReplyEntry,
     ) {
         self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -432,6 +442,10 @@ impl Filesystem for CofferFS {
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -477,6 +491,10 @@ impl Filesystem for CofferFS {
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -540,6 +558,10 @@ impl Filesystem for CofferFS {
         reply: ReplyEntry,
     ) {
         self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
         let (Some(name), Some(target_str)) = (link_name.to_str(), target.to_str()) else {
             reply.error(Errno::EINVAL);
             return;
@@ -593,6 +615,10 @@ impl Filesystem for CofferFS {
         reply: ReplyEmpty,
     ) {
         self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
         let (Some(name), Some(newname)) = (name.to_str(), newname.to_str()) else {
             reply.error(Errno::EINVAL);
             return;
@@ -642,8 +668,15 @@ impl Filesystem for CofferFS {
         reply.ok();
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, _flags: fuser::OpenFlags, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
         self.touch();
+        // The kernel already refuses writes on an `ro` mount; this is the
+        // belt to that suspenders, for the case the mount option ever gets
+        // lost (a remount, a foreign mount helper).
+        if self.read_only && (flags.0 & libc::O_ACCMODE) != libc::O_RDONLY {
+            reply.error(Errno::EROFS);
+            return;
+        }
         reply.opened(FileHandle(ino.0), fuser::FopenFlags::empty());
     }
 
@@ -658,6 +691,10 @@ impl Filesystem for CofferFS {
         reply: ReplyCreate,
     ) {
         self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
             return;
@@ -779,6 +816,10 @@ impl Filesystem for CofferFS {
         reply: ReplyWrite,
     ) {
         self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
         if offset > MAX_FILE_SIZE || data.len() as u64 > MAX_FILE_SIZE - offset {
             reply.error(Errno::EFBIG);
             return;

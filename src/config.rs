@@ -10,6 +10,7 @@
 //! idle_timeout = 30m          # optional, same format as --idle-timeout
 //! compact_on_idle = 2h        # optional, same format as --compact-on-idle
 //! password_file = ~/.coffer/work.pw   # optional, same as --password-file
+//! log_file = ~/.coffer/work.log      # optional, same as --log
 //! ```
 //!
 //! Parsed by hand rather than through a TOML/serde dependency: the format
@@ -34,6 +35,7 @@ pub struct Vault {
     pub idle_timeout: Option<String>,
     pub compact_on_idle: Option<String>,
     pub password_file: Option<PathBuf>,
+    pub log_file: Option<PathBuf>,
 }
 
 struct Section {
@@ -173,8 +175,8 @@ impl Config {
 
     fn vault_from(&self, section: &Section) -> Result<Vault> {
         let where_ = |what: &str| format!("{}: [{}]: {what}", self.path.display(), section.name);
-        let (mut file, mut mountpoint, mut idle_timeout, mut compact_on_idle, mut password_file) =
-            (None, None, None, None, None);
+        let (mut file, mut mountpoint, mut idle_timeout, mut compact_on_idle, mut password_file, mut log_file) =
+            (None, None, None, None, None, None);
         for raw in &section.lines {
             if is_comment(raw) {
                 continue;
@@ -192,8 +194,9 @@ impl Config {
                 "idle_timeout" => idle_timeout = Some(value.to_string()),
                 "compact_on_idle" => compact_on_idle = Some(value.to_string()),
                 "password_file" => password_file = Some(expand_tilde(value)),
+                "log_file" => log_file = Some(expand_tilde(value)),
                 other => bail!(where_(&format!(
-                    "unknown key {other:?} (expected file, mountpoint, idle_timeout, compact_on_idle or password_file)"
+                    "unknown key {other:?} (expected file, mountpoint, idle_timeout, compact_on_idle, password_file or log_file)"
                 ))),
             }
         }
@@ -204,6 +207,7 @@ impl Config {
             idle_timeout,
             compact_on_idle,
             password_file,
+            log_file,
         })
     }
 
@@ -306,6 +310,9 @@ fn render(vault: &Vault) -> Vec<String> {
     if let Some(v) = &vault.password_file {
         lines.push(format!("password_file = {}", v.display()));
     }
+    if let Some(v) = &vault.log_file {
+        lines.push(format!("log_file = {}", v.display()));
+    }
     lines
 }
 
@@ -325,6 +332,7 @@ mod tests {
             idle_timeout: None,
             compact_on_idle: None,
             password_file: None,
+            log_file: None,
         }
     }
 
@@ -389,10 +397,11 @@ mod tests {
         v.idle_timeout = Some("30m".into());
         v.compact_on_idle = Some("2h".into());
         v.password_file = Some("/pw".into());
+        v.log_file = Some("/log".into());
         c.upsert(&v);
         let text = c.to_text();
         assert!(text.starts_with("# coffer vault registry"));
-        assert!(text.ends_with("\n[work]\nfile = /data/work.coffer\nmountpoint = /mnt/work\nidle_timeout = 30m\ncompact_on_idle = 2h\npassword_file = /pw\n"));
+        assert!(text.ends_with("\n[work]\nfile = /data/work.coffer\nmountpoint = /mnt/work\nidle_timeout = 30m\ncompact_on_idle = 2h\npassword_file = /pw\nlog_file = /log\n"));
         assert_eq!(cfg(&text).vaults().unwrap(), vec![v]);
     }
 
