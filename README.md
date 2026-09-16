@@ -1,5 +1,10 @@
 # cofferFS
 
+[![Release](https://img.shields.io/github/v/release/rtulke/cofferFS?label=release)](https://github.com/rtulke/cofferFS/releases)
+[![Build](https://github.com/rtulke/cofferFS/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/rtulke/cofferFS/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/github/license/rtulke/cofferFS)](LICENSE)
+![Platforms](https://img.shields.io/badge/linux-amd64%20%7C%20arm64-blue)
+
 `coffer` puts an encrypted, growable container into a single file and
 mounts it as an ordinary directory - as a normal user, no root, no sudo.
 Inside, `cp`, `mv`, `rsync`, editors and file managers all just work.
