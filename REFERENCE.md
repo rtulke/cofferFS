@@ -481,6 +481,18 @@ SQLCipher build happens to be in a given distro's archive at the time.
 All packages pass the full `test-install.sh` cycle (install, create, mount,
 write, read, unmount, check) on every target and both architectures.
 
+**Source packages for external repositories.** Two more definitions live
+next to the binary packaging, for repositories that build from source on
+their own infrastructure: `packaging/aur/PKGBUILD` for the Arch User
+Repository and `packaging/rpm/coffer.spec` for COPR (Fedora, EL 9/10) or
+any other rpmbuild-based service. Both build from the release tarball of a
+pinned tag, hand build.rs the tag's commit through `COFFER_GIT_HASH` (there
+is no `.git` in a tarball, and `coffer --version` should still name the
+commit), and are built, installed and smoke-tested by the "Source
+packages" workflow on Arch, Fedora 44, EL9 and EL10 whenever they change
+and on every release tag. On a release, bump the version, the commit and
+the checksum in both files in the same commit as `Cargo.toml`.
+
 ## Files in this repo
 
 - `src/` — the FUSE filesystem + CLI implementation

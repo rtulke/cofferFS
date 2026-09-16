@@ -1,0 +1,61 @@
+# Maintainer: Robert Tulke <rt@debian.sh>
+#
+# Source package for the AUR (https://aur.archlinux.org/packages/coffer).
+# Builds from the release tarball, so no .git is around at build time -
+# COFFER_GIT_HASH hands build.rs the commit the tag points at, so that
+# `coffer --version` reports it like the .deb/.rpm builds do. Bump
+# pkgver, _commit and sha256sums together on every release; the "Source
+# packages" workflow builds and smoke-tests this file on Arch whenever it
+# changes and on every release tag.
+
+pkgname=coffer
+pkgver=0.1.1
+pkgrel=1
+pkgdesc="Growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/rtulke/cofferFS"
+license=('MIT')
+# fuse3 for the fusermount3 helper that mount/umount shell out to. No
+# libfuse: fuser's pure-Rust mount links none. SQLCipher and OpenSSL are
+# compiled from source and statically linked (perl is for OpenSSL's build).
+depends=('fuse3' 'gcc-libs' 'glibc')
+makedepends=('rust' 'perl')
+_commit=dbbfbf50160a044b3193a6cb38aa63753c42d37b
+source=("cofferFS-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('6c685606f62bd5d7b01ec6ab4239770c4a255c8c632d59d9e8edab7413ecd3da')
+
+prepare() {
+    cd "cofferFS-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "cofferFS-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    export COFFER_GIT_HASH="${_commit:0:7}"
+    cargo build --release --frozen
+    target/release/coffer completions bash > coffer.bash
+    target/release/coffer completions zsh  > _coffer
+    target/release/coffer completions fish > coffer.fish
+}
+
+check() {
+    cd "cofferFS-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo test --release --frozen
+}
+
+package() {
+    cd "cofferFS-$pkgver"
+    install -Dm755 target/release/coffer "$pkgdir/usr/bin/coffer"
+    # makepkg compresses man pages itself (zipman), so install it plain.
+    install -Dm644 packaging/coffer.1 "$pkgdir/usr/share/man/man1/coffer.1"
+    install -Dm644 coffer.bash "$pkgdir/usr/share/bash-completion/completions/coffer"
+    install -Dm644 _coffer     "$pkgdir/usr/share/zsh/site-functions/_coffer"
+    install -Dm644 coffer.fish "$pkgdir/usr/share/fish/vendor_completions.d/coffer.fish"
+    install -Dm644 README.md REFERENCE.md -t "$pkgdir/usr/share/doc/coffer/"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/coffer/LICENSE"
+}

@@ -1,0 +1,119 @@
+name: Source packages
+
+# Builds the two source-package definitions that external repositories
+# consume - the AUR PKGBUILD and the RPM spec for COPR - from the release
+# tarball they point at, installs the result and runs the same FUSE smoke
+# test as the release workflow. This catches a stale checksum, a missing
+# build dependency or a distro rust that is too old before an AUR/COPR
+# user does. Both files pin a tag, so this job tests the latest release,
+# not the commit being pushed; bump pkgver/Version in the same commit as
+# the version.
+on:
+  push:
+    branches: [main]
+    paths:
+      - packaging/aur/**
+      - packaging/rpm/**
+      - .github/workflows/packaging-sources.yml
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths:
+      - packaging/aur/**
+      - packaging/rpm/**
+      - .github/workflows/packaging-sources.yml
+  workflow_dispatch:
+
+jobs:
+  aur:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # makepkg refuses to run as root, hence the throwaway user. Same
+      # docker flags as the release workflow's verify jobs, see there for
+      # why each one is needed for a FUSE mount inside a container.
+      - name: Build the PKGBUILD on Arch, install it, smoke-test it
+        run: |
+          docker run --rm \
+            --cap-add SYS_ADMIN --device /dev/fuse \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            -v "$PWD/packaging/aur:/aur:ro" \
+            archlinux:base-devel \
+            bash -euxc '
+              pacman -Syu --noconfirm --needed rust perl fuse3 >/dev/null
+              useradd -m builder
+              cp /aur/PKGBUILD /home/builder/ && chown builder /home/builder/PKGBUILD
+              su builder -c "cd ~ && makepkg --noconfirm"
+              su builder -c "cd ~ && makepkg --printsrcinfo" > /tmp/.SRCINFO
+              pacman -U --noconfirm /home/builder/coffer-*.pkg.tar.zst
+              coffer --version
+              coffer --version | grep -qv unknown
+              test -f /usr/share/bash-completion/completions/coffer
+              test -f /usr/share/man/man1/coffer.1.gz
+              test -f /usr/share/licenses/coffer/LICENSE
+
+              mkdir -p /root/mnt
+              printf "testpass\ntestpass\n" | coffer create /root/vault.coffer
+              printf "testpass\n" | coffer mount /root/vault.coffer /root/mnt --foreground &
+              MOUNT_PID=$!
+              sleep 1
+              echo "hello from CI" > /root/mnt/f.txt
+              grep -q "hello from CI" /root/mnt/f.txt
+              fusermount3 -u /root/mnt
+              wait "$MOUNT_PID" 2>/dev/null || true
+              printf "testpass\n" | coffer check /root/vault.coffer
+              cat /tmp/.SRCINFO
+            '
+
+  spec:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: fedora44
+            image: fedora:44
+          - id: el9
+            image: almalinux:9
+          - id: el10
+            image: almalinux:10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rpmbuild with the distro's own rust/cargo, exactly what COPR would
+      # use - so this is also the check that the distro toolchain is new
+      # enough. The spec fetches crates over the network during %build.
+      - name: Build the spec on ${{ matrix.id }}, install it, smoke-test it
+        run: |
+          docker run --rm \
+            --cap-add SYS_ADMIN --device /dev/fuse \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            -v "$PWD/packaging/rpm:/spec:ro" \
+            ${{ matrix.image }} \
+            bash -euxc '
+              dnf install -y --allowerasing --setopt=install_weak_deps=False \
+                rpm-build rpmdevtools cargo rust gcc make perl fuse3 curl >/dev/null
+              rpmdev-setuptree
+              cp /spec/coffer.spec ~/rpmbuild/SPECS/
+              spectool -g -R ~/rpmbuild/SPECS/coffer.spec
+              rpmbuild -ba ~/rpmbuild/SPECS/coffer.spec
+              ls ~/rpmbuild/RPMS/*/ ~/rpmbuild/SRPMS/
+              dnf install -y ~/rpmbuild/RPMS/*/coffer-*.rpm
+              rpm -q coffer
+              coffer --version
+              coffer --version | grep -qv unknown
+              rpm -ql coffer | grep -qx /usr/share/man/man1/coffer.1.gz
+              test -f /usr/share/bash-completion/completions/coffer
+
+              mkdir -p /root/mnt
+              printf "testpass\ntestpass\n" | coffer create /root/vault.coffer
+              printf "testpass\n" | coffer mount /root/vault.coffer /root/mnt --foreground &
+              MOUNT_PID=$!
+              sleep 1
+              echo "hello from CI" > /root/mnt/f.txt
+              grep -q "hello from CI" /root/mnt/f.txt
+              fusermount3 -u /root/mnt
+              wait "$MOUNT_PID" 2>/dev/null || true
+              printf "testpass\n" | coffer check /root/vault.coffer
+            '
