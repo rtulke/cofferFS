@@ -5,7 +5,10 @@ CARGO_TARGET_DIR ?= target
 
 .PHONY: build release debug man completions install uninstall clean test check-deps
 
-build: release
+# Also generates the man page and completions, so that the documented
+# `make build` + `sudo make install` flow has everything ready before root
+# gets involved (see `install` below for why root can't generate them).
+build: release man completions
 
 # Fail fast with a readable hint when the FUSE dev files or the Rust
 # toolchain aren't installed yet - the usual case when `make` is run on a
@@ -46,25 +49,31 @@ completions:
 	$(CARGO_TARGET_DIR)/release/coffer completions zsh > target/completions/_coffer
 	$(CARGO_TARGET_DIR)/release/coffer completions fish > target/completions/coffer.fish
 
-# Building as root (typically via `sudo make install` run directly, without
-# ./setup.sh) doesn't work reliably: root has no Rust toolchain of its own,
-# and some setups don't even let root read into a locked-down $HOME - so
-# skip the auto-build in that case and fail with a clear next step instead
-# of letting cargo's confusing "could not find Cargo.toml" surface.
-install: man
+# Building - or even just generating the man page and completions - as root
+# (typically via `sudo make install` run directly, without ./setup.sh)
+# doesn't work reliably: root has no Rust toolchain of its own, some setups
+# don't let root read into a locked-down $HOME, and on an NFS home with
+# root_squash root can't write into target/ at all (gzip fails with
+# "Permission denied" on the man page). So as root nothing is built or
+# generated here: everything is expected to exist already from a `make
+# build` run as the normal user, and a missing piece fails with a clear
+# next step instead of letting cargo's confusing "could not find
+# Cargo.toml" (or that gzip error) surface.
+install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		if [ ! -r target/release/coffer ]; then \
-			echo "error: target/release/coffer is missing or unreadable as root." >&2; \
-			echo "Build it as your normal user first, then install:" >&2; \
-			echo "    make release" >&2; \
+		for f in target/release/coffer target/man/coffer.1.gz \
+		         target/completions/coffer.bash target/completions/_coffer target/completions/coffer.fish; do \
+			[ -r "$$f" ] && continue; \
+			echo "error: $$f is missing or unreadable as root." >&2; \
+			echo "Build everything as your normal user first, then install:" >&2; \
+			echo "    make build" >&2; \
 			echo "    sudo make install" >&2; \
 			echo "Or just run ./setup.sh, which handles this for you." >&2; \
 			exit 1; \
-		fi; \
+		done; \
 	else \
-		$(MAKE) release; \
+		$(MAKE) build; \
 	fi
-	$(MAKE) completions
 	install -Dm755 target/release/coffer $(DESTDIR)$(PREFIX)/bin/coffer
 	install -Dm644 target/man/coffer.1.gz $(DESTDIR)$(PREFIX)/share/man/man1/coffer.1.gz
 	install -Dm644 target/completions/coffer.bash $(DESTDIR)$(PREFIX)/share/bash-completion/completions/coffer
