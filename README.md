@@ -61,6 +61,20 @@ Tumbleweed users should take the rolling
 [`latest`](https://github.com/rtulke/cofferFS/releases/tag/latest)
 prerelease, rebuilt on every push to `main`, rather than a tagged version.
 
+### Verifying a download
+
+Every release ships `SHA256SUMS` and a [minisign](https://jedisct1.github.io/minisign/)
+signature over it, made with this key (also in [`minisign.pub`](minisign.pub)):
+
+```
+RWQ+t65ZtqJCgWr+lzpOt84AQwlTWWeXkovMWjdwJM2+EFvmCrJwzB8R
+```
+
+```bash
+minisign -Vm SHA256SUMS -P RWQ+t65ZtqJCgWr+lzpOt84AQwlTWWeXkovMWjdwJM2+EFvmCrJwzB8R
+sha256sum -c SHA256SUMS --ignore-missing      # checks the package(s) you downloaded
+```
+
 ### From source
 
 ```bash

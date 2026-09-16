@@ -495,6 +495,17 @@ SQLCipher build happens to be in a given distro's archive at the time.
 All packages pass the full `test-install.sh` cycle (install, create, mount,
 write, read, unmount, check) on every target and both architectures.
 
+**Signatures.** The release job writes `SHA256SUMS` over every package and
+signs that file with [minisign](https://jedisct1.github.io/minisign/)
+(`SHA256SUMS.minisig`). A checksum file alone proves nothing - whoever can
+replace a package on the download page can replace the checksums next to
+it - so the signature is what to verify, against the public key in
+`minisign.pub` at the repository root (and in the README). The signing
+key is a plain minisign key stored only in the repository's Actions
+secrets; the job verifies its own signature against the committed public
+key before publishing, so a mismatch between the two fails the release
+rather than shipping an unverifiable signature.
+
 **Source packages for external repositories.** Two more definitions live
 next to the binary packaging, for repositories that build from source on
 their own infrastructure: `packaging/aur/PKGBUILD` for the Arch User

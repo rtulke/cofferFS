@@ -333,6 +333,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # For minisign.pub, so the signature made below is verified against
+      # the very key users are told to check with.
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -359,12 +363,32 @@ jobs:
             echo "notes=Rolling build of main@${GITHUB_SHA::7} - not a stable release, see the tagged vX.Y.Z releases for that. $PKGS" >> "$GITHUB_OUTPUT"
           fi
 
+      # SHA256SUMS next to the packages proves nothing on its own - whoever
+      # can swap a package can swap the checksum file too. The minisign
+      # signature over it is what a user can actually verify, against the
+      # public key in the repository (minisign.pub, also in the README).
+      # The secret key is a plain (unencrypted) minisign key held only in
+      # this repository's secrets; minisign still asks for a password on
+      # stdin, hence </dev/null.
+      - name: Sign the checksums
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          sudo apt-get install -y -qq minisign >/dev/null
+          cd artifacts
+          sha256sum *.deb *.rpm > SHA256SUMS
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          minisign -S -s /tmp/minisign.key -m SHA256SUMS \
+            -t "cofferFS ${{ steps.rel.outputs.tag }} ${GITHUB_SHA::7}" \
+            -x SHA256SUMS.minisig </dev/null
+          rm -f /tmp/minisign.key
+          minisign -V -p "$GITHUB_WORKSPACE/minisign.pub" -m SHA256SUMS -x SHA256SUMS.minisig
+
       - name: Create or update the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd artifacts
-          sha256sum *.deb *.rpm > SHA256SUMS
           TAG="${{ steps.rel.outputs.tag }}"
           PRERELEASE_FLAG=""
           [[ "${{ steps.rel.outputs.prerelease }}" == "true" ]] && PRERELEASE_FLAG="--prerelease"
