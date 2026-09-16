@@ -346,11 +346,16 @@ jobs:
             echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "title=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            # Explicit, because GitHub otherwise hands the "Latest" label
+            # to whichever release was *created* most recently - and a
+            # re-run of an older tag's workflow would steal it.
+            echo "latest=true" >> "$GITHUB_OUTPUT"
             echo "notes=coffer $GITHUB_REF_NAME - $PKGS" >> "$GITHUB_OUTPUT"
           else
             echo "tag=latest" >> "$GITHUB_OUTPUT"
             echo "title=coffer (main, rolling build)" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
             echo "notes=Rolling build of main@${GITHUB_SHA::7} - not a stable release, see the tagged vX.Y.Z releases for that. $PKGS" >> "$GITHUB_OUTPUT"
           fi
 
@@ -375,7 +380,10 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "${{ steps.rel.outputs.title }}" \
             --notes "${{ steps.rel.outputs.notes }}" \
+            --latest=${{ steps.rel.outputs.latest }} \
             $PRERELEASE_FLAG \
             * \
-          || gh release upload "$TAG" * \
-            --repo "$GITHUB_REPOSITORY" --clobber
+          || { gh release upload "$TAG" * \
+                 --repo "$GITHUB_REPOSITORY" --clobber \
+               && gh release edit "$TAG" \
+                 --repo "$GITHUB_REPOSITORY" --latest=${{ steps.rel.outputs.latest }}; }
