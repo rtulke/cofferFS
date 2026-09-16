@@ -50,8 +50,11 @@ jobs:
               coffer --version
               coffer --version | grep -qv unknown
               test -f /usr/share/bash-completion/completions/coffer
-              test -f /usr/share/man/man1/coffer.1.gz
-              test -f /usr/share/licenses/coffer/LICENSE
+              # The archlinux image sets NoExtract for man pages and docs in
+              # pacman.conf (same idea as Fedora nodocs), so check the
+              # package manifest rather than the filesystem for those.
+              pacman -Ql coffer | grep -q " /usr/share/man/man1/coffer.1.gz$"
+              pacman -Ql coffer | grep -q " /usr/share/licenses/coffer/LICENSE$"
 
               mkdir -p /root/mnt
               printf "testpass\ntestpass\n" | coffer create /root/vault.coffer

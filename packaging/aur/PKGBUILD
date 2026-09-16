@@ -24,7 +24,9 @@ makedepends=('rust' 'perl')
 # the C objects of the bundled SQLCipher/OpenSSL into GCC LTO bytecode that
 # rustc's linker (lld) cannot read - the link then fails with hundreds of
 # "undefined symbol: sqlite3_*". Cargo's own LTO (Cargo.toml) is unaffected.
-options=('!lto')
+# !debug: the release profile strips the binary, so the debug split package
+# would be empty.
+options=('!lto' '!debug')
 _commit=4abade2a61e75a96be3a4142ecdd4705d6267d70
 source=("cofferFS-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('3eddb663ed7514b2b574be8b7fa7df43e212db574944f06b6db481d836ee7c0f')
