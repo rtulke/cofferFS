@@ -25,24 +25,29 @@ The full design rationale, operational details and packaging notes live in
 
 ### Debian / Ubuntu
 
-Prebuilt `.deb` packages for Debian 12/13 and Ubuntu 24.04/26.04 are on the
+Prebuilt `.deb` packages for Debian 12/13 and Ubuntu 24.04/26.04, each for
+amd64 and arm64, are on the
 [Releases page](https://github.com/rtulke/cofferFS/releases). Take the one
-built for your distro:
+built for your distro and architecture:
 
 ```bash
-sudo apt-get install ./coffer_*_<debian12|debian13|ubuntu2404|ubuntu2604>_amd64.deb
+sudo apt-get install ./coffer_*_<debian12|debian13|ubuntu2404|ubuntu2604>_<amd64|arm64>.deb
 ```
+
+Raspberry Pi OS (64-bit) is Debian underneath: Bookworm takes the
+`debian12_arm64` package, Trixie the `debian13_arm64` one.
 
 ### Fedora / Enterprise Linux / openSUSE
 
 Prebuilt `.rpm` packages for Fedora 43/44, EL9/EL10 (RHEL, AlmaLinux,
-Rocky, Oracle), openSUSE Leap 16.0 and Tumbleweed are on the same
+Rocky, Oracle), openSUSE Leap 16.0 and Tumbleweed, each for x86_64 and
+aarch64, are on the same
 [Releases page](https://github.com/rtulke/cofferFS/releases). The distro
 name in the file says which is which:
 
 ```bash
-sudo dnf install ./coffer-*-1.<fedora43|fedora44|el9|el10>.x86_64.rpm
-sudo zypper install --allow-unsigned-rpm ./coffer-*-1.<leap160|tumbleweed>.x86_64.rpm
+sudo dnf install ./coffer-*-1.<fedora43|fedora44|el9|el10>.<x86_64|aarch64>.rpm
+sudo zypper install --allow-unsigned-rpm ./coffer-*-1.<leap160|tumbleweed>.<x86_64|aarch64>.rpm
 ```
 
 Tumbleweed users should take the rolling
@@ -54,10 +59,11 @@ prerelease, rebuilt on every push to `main`, rather than a tagged version.
 ```bash
 git clone https://github.com/rtulke/cofferFS.git
 cd cofferFS
-./setup.sh              # Debian/Ubuntu: installs build deps + rustup, builds, offers to install
+./setup.sh              # installs build deps (apt, dnf or zypper) + rustup, builds, offers to install
 ```
 
-On any other distro install `fuse3`, the libfuse3 development package
+`setup.sh` handles Debian/Ubuntu/Raspberry Pi OS, Fedora/EL and openSUSE.
+On anything else install `fuse3`, the libfuse3 development package
 (`libfuse3-dev` or `fuse3-devel`), `pkg-config`, `gcc`, `make` and `perl`,
 plus a current Rust toolchain via [rustup](https://rustup.rs) - the
 `rustc` shipped by most distros is too old for this project's

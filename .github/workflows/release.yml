@@ -3,11 +3,16 @@ name: Release
 # build+verify run on every push/PR to main so packaging breakage is caught
 # early; the release job only fires on an actual "vX.Y.Z" tag push.
 #
-# Two package families, each built natively per target distro (see the
-# comments on the build jobs for why there's no single universal package):
+# Two package families, each built natively per target distro AND per
+# architecture (see the comments on the build jobs for why there's no
+# single universal package):
 #   .deb  - Debian 12/13, Ubuntu 24.04/26.04           (build / verify)
 #   .rpm  - Fedora 43/44, EL9/EL10, openSUSE Leap 16.0 and Tumbleweed
 #                                                      (build-rpm / verify-rpm)
+# each for amd64 (x86_64) and arm64 (aarch64). The arm64 builds run on
+# GitHub's hosted ARM runners inside the arm64 variants of the very same
+# multi-arch container images, so nothing is cross-compiled or emulated;
+# the Debian arm64 packages are what Raspberry Pi OS (64-bit) installs.
 on:
   push:
     branches: [main]
@@ -24,17 +29,21 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      # id x arch is the real matrix; the include entries only attach the
+      # image to each id and the runner to each arch (an include object
+      # that matches an existing key is merged into every combination with
+      # that value, it does not add a new one).
       matrix:
+        id: [debian12, debian13, ubuntu2404, ubuntu2604]
+        arch: [amd64, arm64]
         include:
-          - id: debian12
-            image: debian:12-slim
-          - id: debian13
-            image: debian:13-slim
-          - id: ubuntu2404
-            image: ubuntu:24.04
-          - id: ubuntu2604
-            image: ubuntu:26.04
-    runs-on: ubuntu-latest
+          - { id: debian12,   image: debian:12-slim }
+          - { id: debian13,   image: debian:13-slim }
+          - { id: ubuntu2404, image: ubuntu:24.04 }
+          - { id: ubuntu2604, image: ubuntu:26.04 }
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     container: ${{ matrix.image }}
     steps:
       # actions/checkout shells out to git, which isn't present in the bare
@@ -81,16 +90,18 @@ jobs:
       - name: Build .deb
         run: cargo deb
 
+      # cargo-deb names the file after the Debian architecture it was built
+      # on (_amd64 / _arm64); the distro id is slotted in before that.
       - name: Rename package with distro id
         run: |
           SRC=$(ls target/debian/*.deb | head -1)
-          DST="target/debian/$(basename "$SRC" | sed "s/_amd64/_${{ matrix.id }}_amd64/")"
+          DST="target/debian/$(basename "$SRC" | sed -E "s/_([a-z0-9]+)\.deb$/_${{ matrix.id }}_\1.deb/")"
           mv "$SRC" "$DST"
           echo "DEB_PATH=$DST" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: deb-${{ matrix.id }}
+          name: deb-${{ matrix.id }}-${{ matrix.arch }}
           path: ${{ env.DEB_PATH }}
           if-no-files-found: error
 
@@ -98,33 +109,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        id: [fedora43, fedora44, el9, el10, leap160, tumbleweed]
+        arch: [amd64, arm64]
         include:
-          - id: fedora43
-            image: fedora:43
-            family: dnf
-          - id: fedora44
-            image: fedora:44
-            family: dnf
+          - { id: fedora43, image: fedora:43, family: dnf }
+          - { id: fedora44, image: fedora:44, family: dnf }
           # AlmaLinux stands in for the whole EL family (RHEL, Rocky, Alma,
           # Oracle) - binary-compatible, and unlike rockylinux its official
           # Docker Hub images cover both 9 and 10.
-          - id: el9
-            image: almalinux:9
-            family: dnf
-          - id: el10
-            image: almalinux:10
-            family: dnf
-          - id: leap160
-            image: opensuse/leap:16.0
-            family: zypper
+          - { id: el9,  image: almalinux:9,  family: dnf }
+          - { id: el10, image: almalinux:10, family: dnf }
+          - { id: leap160, image: opensuse/leap:16.0, family: zypper }
           # Rolling release: a package built today matches today's
           # Tumbleweed. The rolling "latest" prerelease (rebuilt on every
           # push to main) is the one Tumbleweed users should grab; a tagged
           # release's Tumbleweed RPM goes stale whenever libfuse3 bumps.
-          - id: tumbleweed
-            image: opensuse/tumbleweed
-            family: zypper
-    runs-on: ubuntu-latest
+          - { id: tumbleweed, image: opensuse/tumbleweed, family: zypper }
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     container: ${{ matrix.image }}
     steps:
       # Same story as the .deb build: git first, for actions/checkout. rpm-build
@@ -181,13 +184,14 @@ jobs:
       # the same spelled-out scheme as the .deb side
       # (coffer-0.1.0-1.fedora44.x86_64.rpm next to
       # coffer_0.1.0-1_debian12_amd64.deb) - with no rename step needed,
-      # since RPM naming puts the Release field into the file name itself.
+      # since RPM naming puts the Release field and the RPM architecture
+      # (x86_64 / aarch64) into the file name itself.
       - name: Build .rpm
         run: cargo generate-rpm --set-metadata 'release = "1.${{ matrix.id }}"'
 
       - uses: actions/upload-artifact@v7
         with:
-          name: rpm-${{ matrix.id }}
+          name: rpm-${{ matrix.id }}-${{ matrix.arch }}
           path: target/generate-rpm/*.rpm
           if-no-files-found: error
 
@@ -196,20 +200,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        id: [debian12, debian13, ubuntu2404, ubuntu2604]
+        arch: [amd64, arm64]
         include:
-          - id: debian12
-            image: debian:12-slim
-          - id: debian13
-            image: debian:13-slim
-          - id: ubuntu2404
-            image: ubuntu:24.04
-          - id: ubuntu2604
-            image: ubuntu:26.04
-    runs-on: ubuntu-latest
+          - { id: debian12,   image: debian:12-slim }
+          - { id: debian13,   image: debian:13-slim }
+          - { id: ubuntu2404, image: ubuntu:24.04 }
+          - { id: ubuntu2604, image: ubuntu:26.04 }
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: deb-${{ matrix.id }}
+          name: deb-${{ matrix.id }}-${{ matrix.arch }}
 
       # Run the test distro as a plain `docker run` step rather than a job-
       # level `container:`, so every flag docker actually gets is explicit
@@ -243,6 +247,7 @@ jobs:
               apt-get update -qq
               DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /work/coffer_*.deb
               test -f /usr/share/bash-completion/completions/coffer
+              coffer --version
 
               mkdir -p /root/mnt
               printf "testpass\ntestpass\n" | coffer create /root/vault.coffer
@@ -261,30 +266,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        id: [fedora43, fedora44, el9, el10, leap160, tumbleweed]
+        arch: [amd64, arm64]
         include:
-          - id: fedora43
-            image: fedora:43
-            family: dnf
-          - id: fedora44
-            image: fedora:44
-            family: dnf
-          - id: el9
-            image: almalinux:9
-            family: dnf
-          - id: el10
-            image: almalinux:10
-            family: dnf
-          - id: leap160
-            image: opensuse/leap:16.0
-            family: zypper
-          - id: tumbleweed
-            image: opensuse/tumbleweed
-            family: zypper
-    runs-on: ubuntu-latest
+          - { id: fedora43, image: fedora:43, family: dnf }
+          - { id: fedora44, image: fedora:44, family: dnf }
+          - { id: el9,  image: almalinux:9,  family: dnf }
+          - { id: el10, image: almalinux:10, family: dnf }
+          - { id: leap160,    image: opensuse/leap:16.0,  family: zypper }
+          - { id: tumbleweed, image: opensuse/tumbleweed, family: zypper }
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: rpm-${{ matrix.id }}
+          name: rpm-${{ matrix.id }}-${{ matrix.arch }}
 
       # Same docker flags and the same functional cycle as the .deb verify
       # job above (see there for why each flag is needed). A real `dnf
@@ -349,7 +346,7 @@ jobs:
       - name: Determine release identity
         id: rel
         run: |
-          PKGS="one .deb per Debian/Ubuntu target (12/13, 24.04/26.04) and one .rpm per Fedora (43/44), EL (9/10) and openSUSE (Leap 16.0, Tumbleweed) target, see SHA256SUMS"
+          PKGS="one .deb per Debian/Ubuntu target (12/13, 24.04/26.04) and one .rpm per Fedora (43/44), EL (9/10) and openSUSE (Leap 16.0, Tumbleweed) target, each for amd64 and arm64 (the Debian arm64 packages are the ones for Raspberry Pi OS 64-bit), see SHA256SUMS"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "title=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"

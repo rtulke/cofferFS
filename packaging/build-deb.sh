@@ -53,8 +53,11 @@ for id in "${TARGET_IDS[@]}"; do
             make completions
             cargo deb
         '
+    # cargo-deb names the file after the architecture it was built on
+    # (_amd64 on x86_64 hosts, _arm64 on aarch64 - the release workflow
+    # builds both); the distro id is slotted in before that.
     SRC_DEB=$(ls "target-$id/debian/"*.deb | head -1)
-    DST_DEB="dist/$(basename "$SRC_DEB" | sed "s/_amd64/_${id}_amd64/")"
+    DST_DEB="dist/$(basename "$SRC_DEB" | sed -E "s/_([a-z0-9]+)\.deb$/_${id}_\1.deb/")"
     cp "$SRC_DEB" "$DST_DEB"
     echo "-> $DST_DEB"
 done

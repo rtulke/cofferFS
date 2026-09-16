@@ -48,9 +48,12 @@ ZYPPER_INSTALL='zypper --non-interactive --gpg-auto-import-keys refresh
 for id in "${TARGET_IDS[@]}"; do
     img="${TARGET_IMAGES[$id]}"
     case "$img" in
-        debian:*|ubuntu:*) install="$APT_INSTALL";    PKG=$(ls dist/coffer_*_"${id}"_amd64.deb 2>/dev/null | head -1) ;;
-        opensuse/*)        install="$ZYPPER_INSTALL"; PKG=$(ls dist/coffer-*."${id}".x86_64.rpm 2>/dev/null | head -1) ;;
-        *)                 install="$DNF_INSTALL";    PKG=$(ls dist/coffer-*."${id}".x86_64.rpm 2>/dev/null | head -1) ;;
+        # Any architecture: dist/ only ever holds what this host built
+        # (amd64/x86_64 or arm64/aarch64), and the test container runs
+        # natively on the same one.
+        debian:*|ubuntu:*) install="$APT_INSTALL";    PKG=$(ls dist/coffer_*_"${id}"_*.deb 2>/dev/null | head -1) ;;
+        opensuse/*)        install="$ZYPPER_INSTALL"; PKG=$(ls dist/coffer-*."${id}".*.rpm 2>/dev/null | head -1) ;;
+        *)                 install="$DNF_INSTALL";    PKG=$(ls dist/coffer-*."${id}".*.rpm 2>/dev/null | head -1) ;;
     esac
     if [ -z "$PKG" ]; then
         echo "no package for $id in dist/ - run packaging/build-deb.sh / build-rpm.sh first" >&2

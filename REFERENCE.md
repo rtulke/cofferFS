@@ -399,6 +399,15 @@ copy.
 
 ## Packaging
 
+Every package is built twice, for amd64/x86_64 and for arm64/aarch64. The
+release workflow runs the arm64 builds on GitHub's hosted ARM runners
+inside the arm64 variants of the same multi-arch container images, so
+nothing is cross-compiled or emulated and each arm64 package is verified
+exactly like its amd64 twin. The Debian arm64 packages are what Raspberry
+Pi OS (64-bit) installs. 32-bit ARM (armhf, for Pi Zero/1/2) is not built:
+it would need QEMU emulation in CI and the audience is small. The local
+scripts below build whatever architecture the host has.
+
 `packaging/build-deb.sh` builds **one `.deb` per target distro**, each
 natively inside that distro's own container, via
 [cargo-deb](https://github.com/kornelski/cargo-deb). Output goes to
