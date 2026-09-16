@@ -25,6 +25,7 @@ libc = "0.2.189"
 nix = { version = "0.31.3", features = ["fs"] }
 rpassword = "7.5.4"
 rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
+zeroize = "1"
 
 [profile.release]
 strip = true

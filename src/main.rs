@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 /// coffer - growable encrypted containers, mountable as a normal user.
 #[derive(Parser)]
@@ -201,27 +202,30 @@ fn parse_duration(s: &str) -> Result<Duration> {
 
 /// Prompts on the real TTY when there is one (masked input); falls back to a
 /// plain-text stdin read when stdin isn't a terminal (e.g. piped/scripted use).
-fn read_one(prompt: &str) -> Result<String> {
+// Every buffer that ever holds a password is `Zeroizing`: overwritten with
+// zeros when dropped, so it doesn't linger in freed heap memory (which a
+// later allocation, a core dump or a swapped-out page could expose).
+fn read_one(prompt: &str) -> Result<Zeroizing<String>> {
     use std::io::{IsTerminal, Write};
     if std::io::stdin().is_terminal() {
-        Ok(rpassword::prompt_password(prompt)?)
+        Ok(Zeroizing::new(rpassword::prompt_password(prompt)?))
     } else {
         eprint!("{prompt}");
         std::io::stderr().flush().ok();
-        let mut line = String::new();
+        let mut line = Zeroizing::new(String::new());
         std::io::stdin().read_line(&mut line)?;
-        Ok(line.trim_end_matches(['\n', '\r']).to_string())
+        Ok(Zeroizing::new(line.trim_end_matches(['\n', '\r']).to_string()))
     }
 }
 
-fn read_password(confirm: bool) -> Result<String> {
+fn read_password(confirm: bool) -> Result<Zeroizing<String>> {
     let pw = read_one("Container password: ")?;
     if pw.is_empty() {
         bail!("empty password refused");
     }
     if confirm {
         let pw2 = read_one("Confirm password: ")?;
-        if pw != pw2 {
+        if *pw != *pw2 {
             bail!("passwords did not match");
         }
     }
@@ -230,18 +234,18 @@ fn read_password(confirm: bool) -> Result<String> {
 
 /// A password file is its own confirmation (there's nothing to retype
 /// against), so `confirm` only applies to the interactive fallback.
-fn read_password_source(password_file: Option<&Path>, confirm: bool) -> Result<String> {
+fn read_password_source(password_file: Option<&Path>, confirm: bool) -> Result<Zeroizing<String>> {
     let Some(path) = password_file else {
         return read_password(confirm);
     };
     warn_if_world_readable(path);
-    let content = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let content = Zeroizing::new(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?);
     // Only the first line, matching read_one()'s stdin-piped fallback
     // (which reads exactly one line via read_line) - reading the whole file
     // would silently fold an accidental extra line (a trailing comment, a
     // stray blank line) into the password instead of just the line the
     // user actually meant.
-    let pw = content.lines().next().unwrap_or("").to_string();
+    let pw = Zeroizing::new(content.lines().next().unwrap_or("").to_string());
     if pw.is_empty() {
         bail!("empty password in {}", path.display());
     }
@@ -337,6 +341,10 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
         bail!("--compact-on-idle needs a writable mount; drop it or --read-only");
     }
     let abs_file = file.canonicalize().with_context(|| file.display().to_string())?;
+    if compact_on_idle.is_some() {
+        // Must happen here, while this is still a single-threaded process.
+        db::set_temp_dir_beside(&abs_file);
+    }
     // Opened before the password prompt, so an unwritable log path fails
     // here rather than after the mount is already up.
     let log_file = opts.log.as_deref().map(open_log).transpose()?;
@@ -523,13 +531,7 @@ fn spawn_compact_on_idle_watcher(
             "idle with ~{gap} reclaimable bytes, compacting {}...",
             container_path.display()
         ));
-        // VACUUM alone doesn't shrink the main file under WAL mode - it
-        // lands in the WAL first. A normal (non-idle-watcher) connection
-        // gets this for free from SQLite's checkpoint-on-last-close, but
-        // this connection stays open for the mount's whole lifetime, so the
-        // checkpoint has to be forced explicitly or the main file's size on
-        // disk never actually changes.
-        if let Err(e) = guard.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);") {
+        if let Err(e) = db::vacuum(&guard) {
             log_line(&format!("auto-compact failed: {e}"));
         }
     });
@@ -1177,6 +1179,7 @@ fn cmd_info(file: &Path, password_file: Option<&Path>) -> Result<()> {
 
 fn cmd_compact(file: &Path, password_file: Option<&Path>) -> Result<()> {
     let _lock = db::lock_exclusive(file)?;
+    db::set_temp_dir_beside(&std::path::absolute(file)?);
     let password = read_password_source(password_file, false)?;
     let before = std::fs::metadata(file)?.len();
     let con = db::open_db(file, &password, false)?;
@@ -1184,13 +1187,7 @@ fn cmd_compact(file: &Path, password_file: Option<&Path>) -> Result<()> {
         "coffer: compacting {} (VACUUM may need up to ~2x the current size in free disk space temporarily)...",
         file.display()
     );
-    // Explicit checkpoint rather than relying on SQLite's checkpoint-on-
-    // last-close for a WAL-mode database: correct either way here since
-    // this connection does close right after, but relying on that implicit
-    // behavior bit the idle-watcher's long-lived connection (see there), so
-    // making it explicit here too rather than depending on two different
-    // mechanisms to reach the same result.
-    con.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+    db::vacuum(&con)?;
     drop(con);
     let after = std::fs::metadata(file)?.len();
     println!(
@@ -1207,6 +1204,17 @@ fn cmd_completions(shell: clap_complete::Shell) {
 }
 
 fn main() -> Result<()> {
+    // Not dumpable: no core dumps, and no ptrace by other processes of the
+    // same user (root can still). Every subcommand handles the password
+    // and, for mount, keeps the derived key in memory for the whole
+    // session - the one thing a process running as the same user should
+    // not be able to read out of us. Set before anything else, including
+    // clap (a bad flag never makes this matter, but it costs nothing).
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl with PR_SET_DUMPABLE takes plain integers, no pointers.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0);
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Create { file, max_size, password_file, save, mountpoint } => {

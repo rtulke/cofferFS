@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
+use zeroize::Zeroizing;
 
 pub const BLOCK_SIZE: i64 = 128 * 1024;
 pub const SCHEMA_VERSION: &str = "1";
@@ -44,9 +45,42 @@ CREATE TABLE data (
 /// PRAGMA statements don't support bound (?) parameters in SQLite, so the
 /// password has to be embedded as a quoted string literal. Escape any
 /// embedded single quotes the standard SQL way (' -> '').
-pub fn pragma_key_sql(pragma: &str, value: &str) -> String {
-    let escaped = value.replace('\'', "''");
-    format!("PRAGMA {pragma} = '{escaped}'")
+pub fn pragma_key_sql(pragma: &str, value: &str) -> Zeroizing<String> {
+    let escaped = Zeroizing::new(value.replace('\'', "''"));
+    Zeroizing::new(format!("PRAGMA {pragma} = '{}'", *escaped))
+}
+
+/// Where SQLite puts the temporary database that VACUUM (see `vacuum`)
+/// builds the compacted copy in: next to the container. Call once, early,
+/// before any other thread exists - SQLite reads SQLITE_TMPDIR with
+/// getenv() at the moment it creates the file, and mutating the
+/// environment while other threads run is a data race. Without this the
+/// default temp directory applies, which is /tmp on many distros - and
+/// /tmp is frequently a tmpfs, i.e. RAM again, defeating the purpose.
+pub fn set_temp_dir_beside(container_path: &Path) {
+    if let Some(dir) = container_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::env::set_var("SQLITE_TMPDIR", dir);
+    }
+}
+
+/// VACUUM rebuilds the whole database into a temporary database and then
+/// copies it back. SQLite is compiled with SQLITE_TEMP_STORE=2 here (the
+/// rusqlite bundled default), which keeps temporary databases *in memory*
+/// unless told otherwise - measured: compacting a 415 MB container peaked
+/// at 372 MB RSS, so a 10 GB container would need 10 GB of RAM and, from
+/// the idle watcher, take the mount daemon down with it. `temp_store =
+/// FILE` sends the copy to disk instead (see `set_temp_dir_beside`).
+///
+/// The copy stays encrypted: VACUUM attaches its temporary database
+/// without a KEY, and SQLCipher's attach hook then keys it with the main
+/// database's key (attachFunc, `case SQLITE_NULL`) - no plaintext touches
+/// the disk.
+///
+/// The checkpoint is explicit because on a long-lived connection (the
+/// idle watcher's) VACUUM alone only lands in the WAL and the file on
+/// disk never shrinks.
+pub fn vacuum(con: &Connection) -> rusqlite::Result<()> {
+    con.execute_batch("PRAGMA temp_store = FILE; VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
 }
 
 pub fn create_container(path: &Path, password: &str, max_size: u64) -> Result<()> {

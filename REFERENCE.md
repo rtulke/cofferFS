@@ -212,9 +212,15 @@ this after a large deletion, not as routine maintenance - day-to-day
 writes reuse that freed space automatically, so compacting a container
 that's just been growing steadily has nothing to gain. It needs up to
 roughly twice the container's current size in free disk space while it
-runs (temporary, that's just how `VACUUM` works), and refuses to run
-against a mounted container - same reasoning as `passwd`, see **Design
-notes** below.
+runs: `VACUUM` builds the compacted copy in a temporary database, which
+`coffer` places next to the container (not in `/tmp`, which is often a
+RAM-backed tmpfs, and not in memory - SQLite's bundled default would keep
+it there, so a 10 GB container would have needed 10 GB of RAM). That
+temporary copy is encrypted with the container's own key; SQLCipher keys
+every database attached without an explicit key with the main database's
+key, and that is exactly how `VACUUM` attaches it. `compact` refuses to
+run against a mounted container - same reasoning as `passwd`, see
+**Design notes** below.
 
 If you'd rather not think about it at all, `coffer mount --compact-on-idle
 1h` does this automatically while mounted: once the mount has been idle
@@ -266,6 +272,14 @@ of `--compact-on-idle`.
   saying so. The connection id is taken from `/proc/self/mountinfo` *before*
   detaching - deliberately not via `stat()`, which on a FUSE mountpoint is
   itself a FUSE request and hangs if the daemon is wedged.
+- Every `coffer` process marks itself non-dumpable (`PR_SET_DUMPABLE`):
+  no core dumps, and no `ptrace` from other processes of the same user, so
+  another program running under your account cannot read the password or
+  the derived key out of a running mount. Root still can - a mounted
+  container is plaintext to root by definition. Every buffer that holds a
+  password is zeroed when it is dropped, so it does not linger in freed
+  heap memory. Neither helps against a key that has been swapped out;
+  encrypted swap is the system's job.
 - Password prompts mask input on a real terminal; if stdin isn't a TTY
   (piping, scripting), it falls back to a visible plain-text read. Every
   command that takes a password also accepts `--password-file <path>` as an
