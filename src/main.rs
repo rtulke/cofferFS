@@ -100,6 +100,9 @@ enum Cmd {
         /// Default --log for `coffer mount ALIAS`
         #[arg(long, value_name = "FILE")]
         log_file: Option<PathBuf>,
+        /// Always mount this vault read-only (same as --read-only on every mount)
+        #[arg(long)]
+        read_only: bool,
     },
     /// Forget a registered alias (the container file itself is left untouched)
     Remove { alias: String },
@@ -289,6 +292,9 @@ impl MountOpts {
         self.compact_on_idle = self.compact_on_idle.or_else(|| vault.compact_on_idle.clone());
         self.password_file = self.password_file.or_else(|| vault.password_file.clone());
         self.log = self.log.or_else(|| vault.log_file.clone());
+        // A stored read_only can only add restriction; there's no flag to
+        // override it back to writable, which is the point of storing it.
+        self.read_only = self.read_only || vault.read_only;
         self
     }
 }
@@ -1217,7 +1223,7 @@ fn main() -> Result<()> {
             cmd_create(&file, max_size, password_file.as_deref())?;
             if let (Some(alias), Some(cfg)) = (save, cfg.as_mut()) {
                 let mountpoint = mountpoint.expect("clap: --save requires --mountpoint");
-                cmd_add(cfg, Vault { alias, file, mountpoint, idle_timeout: None, compact_on_idle: None, password_file: None, log_file: None })?;
+                cmd_add(cfg, Vault { alias, file, mountpoint, idle_timeout: None, compact_on_idle: None, password_file: None, log_file: None, read_only: false })?;
             }
             Ok(())
         }
@@ -1233,14 +1239,15 @@ fn main() -> Result<()> {
                     compact_on_idle: opts.compact_on_idle.clone(),
                     password_file: opts.password_file.clone(),
                     log_file: opts.log.clone(),
+                    read_only: opts.read_only,
                 };
                 cmd_add(&mut Config::load()?, vault)?;
             }
             cmd_mount(&file, &mountpoint, opts)
         }
         Cmd::Umount { target } => cmd_umount(target.as_deref()),
-        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file } => {
-            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file };
+        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file, read_only } => {
+            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file, read_only };
             cmd_add(&mut Config::load()?, vault)
         }
         Cmd::Remove { alias } => cmd_remove(&mut Config::load()?, &alias),

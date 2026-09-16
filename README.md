@@ -121,9 +121,10 @@ From then on the alias stands in for file and mountpoint everywhere:
 file, size, last modified, mounted or not) and asks which one. Options
 given to `coffer add` become that alias's defaults; anything passed on the
 command line still wins. `--read-only` (`-r`) mounts a container without
-any chance of writing to it, for example a backup copy; `--log FILE`
-(`-l`) gives a daemonized mount a place to report idle unmounts,
-auto-compaction and errors.
+any chance of writing to it, for example a backup copy; stored with
+`coffer add --read-only`, an archive vault is read-only on every mount.
+`--log FILE` (`-l`) gives a daemonized mount a place to report idle
+unmounts, auto-compaction and errors.
 
 The file is plain INI, one section per vault, safe to edit by hand:
 
@@ -217,7 +218,7 @@ there is something meaningful to reclaim.
 | `create FILE` | Create a new container (password prompted twice) | `--max-size 10G`, `--save ALIAS --mountpoint DIR`, `--password-file` |
 | `mount [FILE\|ALIAS] [DIR]` | Mount as the current user; no argument = registered vault or menu | `--save ALIAS`, `--idle-timeout`, `--compact-on-idle`, `--foreground`, `--password-file`, `--read-only` (`-r`), `--log FILE` (`-l`) |
 | `umount [DIR\|ALIAS]` | Unmount; no argument = the mounted registered vault or menu | |
-| `add ALIAS FILE DIR` | Register a vault in `~/.coffer/config` | `--idle-timeout`, `--compact-on-idle`, `--password-file`, `--log-file` |
+| `add ALIAS FILE DIR` | Register a vault in `~/.coffer/config` | `--idle-timeout`, `--compact-on-idle`, `--password-file`, `--log-file`, `--read-only` |
 | `remove ALIAS` | Forget an alias (the file stays) | |
 | `list` | Registered vaults and whether each is mounted | |
 | `info FILE\|ALIAS` | Counts and sizes | `--password-file` |

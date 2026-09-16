@@ -11,6 +11,7 @@
 //! compact_on_idle = 2h        # optional, same format as --compact-on-idle
 //! password_file = ~/.coffer/work.pw   # optional, same as --password-file
 //! log_file = ~/.coffer/work.log      # optional, same as --log
+//! read_only = true                    # optional, same as --read-only
 //! ```
 //!
 //! Parsed by hand rather than through a TOML/serde dependency: the format
@@ -36,6 +37,7 @@ pub struct Vault {
     pub compact_on_idle: Option<String>,
     pub password_file: Option<PathBuf>,
     pub log_file: Option<PathBuf>,
+    pub read_only: bool,
 }
 
 struct Section {
@@ -177,6 +179,7 @@ impl Config {
         let where_ = |what: &str| format!("{}: [{}]: {what}", self.path.display(), section.name);
         let (mut file, mut mountpoint, mut idle_timeout, mut compact_on_idle, mut password_file, mut log_file) =
             (None, None, None, None, None, None);
+        let mut read_only = false;
         for raw in &section.lines {
             if is_comment(raw) {
                 continue;
@@ -195,8 +198,15 @@ impl Config {
                 "compact_on_idle" => compact_on_idle = Some(value.to_string()),
                 "password_file" => password_file = Some(expand_tilde(value)),
                 "log_file" => log_file = Some(expand_tilde(value)),
+                "read_only" => {
+                    read_only = match value.to_ascii_lowercase().as_str() {
+                        "true" | "yes" | "on" | "1" => true,
+                        "false" | "no" | "off" | "0" => false,
+                        _ => bail!(where_(&format!("`read_only` must be true or false, got {value:?}"))),
+                    }
+                }
                 other => bail!(where_(&format!(
-                    "unknown key {other:?} (expected file, mountpoint, idle_timeout, compact_on_idle, password_file or log_file)"
+                    "unknown key {other:?} (expected file, mountpoint, idle_timeout, compact_on_idle, password_file, log_file or read_only)"
                 ))),
             }
         }
@@ -208,6 +218,7 @@ impl Config {
             compact_on_idle,
             password_file,
             log_file,
+            read_only,
         })
     }
 
@@ -313,6 +324,9 @@ fn render(vault: &Vault) -> Vec<String> {
     if let Some(v) = &vault.log_file {
         lines.push(format!("log_file = {}", v.display()));
     }
+    if vault.read_only {
+        lines.push("read_only = true".to_string());
+    }
     lines
 }
 
@@ -333,6 +347,7 @@ mod tests {
             compact_on_idle: None,
             password_file: None,
             log_file: None,
+            read_only: false,
         }
     }
 
@@ -362,6 +377,8 @@ mod tests {
         assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nbogus=1\n").vaults().is_err(), "unknown key");
         assert!(cfg("[a]\nfile=/x\nmountpoint=/m\njunk\n").vaults().is_err(), "line without =");
         assert!(cfg("[a]\nfile=\nmountpoint=/m\n").vaults().is_err(), "empty value");
+        assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nread_only=maybe\n").vaults().is_err(), "bad read_only");
+        assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nread_only=yes\n").vaults().unwrap()[0].read_only);
         for bad in ["", "-x", ".x", "a b", "a/b", "a[b]"] {
             assert!(validate_alias(bad).is_err(), "{bad:?} should be rejected");
         }
@@ -398,10 +415,11 @@ mod tests {
         v.compact_on_idle = Some("2h".into());
         v.password_file = Some("/pw".into());
         v.log_file = Some("/log".into());
+        v.read_only = true;
         c.upsert(&v);
         let text = c.to_text();
         assert!(text.starts_with("# coffer vault registry"));
-        assert!(text.ends_with("\n[work]\nfile = /data/work.coffer\nmountpoint = /mnt/work\nidle_timeout = 30m\ncompact_on_idle = 2h\npassword_file = /pw\nlog_file = /log\n"));
+        assert!(text.ends_with("\n[work]\nfile = /data/work.coffer\nmountpoint = /mnt/work\nidle_timeout = 30m\ncompact_on_idle = 2h\npassword_file = /pw\nlog_file = /log\nread_only = true\n"));
         assert_eq!(cfg(&text).vaults().unwrap(), vec![v]);
     }
 

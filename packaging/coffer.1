@@ -45,6 +45,7 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR FILE ]
 .RB [ \-\-log\-file
 .IR FILE ]
+.RB [ \-\-read\-only ]
 .br
 .B coffer remove
 .I alias
@@ -305,7 +306,7 @@ the mount daemon exits and releases the container's lock right away instead
 of lingering until the last holder lets go; anything that still had files
 open there gets I/O errors from then on.
 .TP
-.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE "] [\-\-log\-file " FILE ]
+.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE "] [\-\-log\-file " FILE "] [\-\-read\-only]
 Register
 .I file
 (which must already exist) and
@@ -317,7 +318,10 @@ in
 replacing an existing entry of that name. Both paths are stored absolute.
 The options are stored with the entry and become the defaults for
 .B mount
-.IR alias .
+.IR alias ;
+.B \-\-read\-only
+makes every mount of the alias read\-only (there is no flag to override
+a stored read\-only back to writable).
 An alias consists of letters, digits,
 .BR \- ", " _ " and " . ,
 and must start with a letter or digit.
@@ -409,8 +413,10 @@ The per-user vault registry: one
 section per registered vault, with
 .BR file " and " mountpoint
 lines and optionally
-.BR idle_timeout ", " compact_on_idle ", " password_file " and " log_file
-(same formats as the corresponding flags). Written atomically with mode
+.BR idle_timeout ", " compact_on_idle ", " password_file ", " log_file " and " read_only
+(same formats as the corresponding flags;
+.B read_only
+takes true or false). Written atomically with mode
 0600 (a freshly created
 .I ~/.coffer
 gets 0700). Safe to edit by hand: comments on their own line are kept,
