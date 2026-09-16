@@ -16,6 +16,10 @@
 
 %global commit 4abade2a61e75a96be3a4142ecdd4705d6267d70
 %global shortcommit %(c=%{commit}; echo ${c:0:7})
+# The release profile strips the binary (Cargo.toml), so find-debuginfo has
+# nothing to extract and EL's rpmbuild aborts on the empty debug source
+# list. No debuginfo subpackage, then.
+%global debug_package %{nil}
 
 Name:           coffer
 Version:        0.1.1
@@ -45,7 +49,10 @@ SQLite's WAL journal.
 %autosetup -n cofferFS-%{version}
 
 %build
+# Both spellings: build.rs reads COFFER_GIT_HASH from 0.1.2 on, the 0.1.1
+# tarball only knows the GITHUB_SHA fallback.
 export COFFER_GIT_HASH=%{shortcommit}
+export GITHUB_SHA=%{commit}
 cargo build --release --locked
 target/release/coffer completions bash > coffer.bash
 target/release/coffer completions zsh  > _coffer
