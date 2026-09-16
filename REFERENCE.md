@@ -428,67 +428,58 @@ packaging/test-install.sh       # installs each into a matching fresh
 [cargo-generate-rpm](https://github.com/cat-in-136/cargo-generate-rpm))
 follow the exact same per-distro pattern: Fedora 43 and 44, Enterprise
 Linux 9 and 10 (built on AlmaLinux, binary-compatible with RHEL, Rocky and
-Oracle), openSUSE Leap 16.0 and Tumbleweed. The libfuse3 split runs
-through the RPM world just the same - EL9/EL10 and Fedora 43 are on fuse
-3.10-3.16 (`libfuse3.so.3`), Fedora 44 and Tumbleweed on 3.18
-(`libfuse3.so.4`) - so each RPM is built natively in its distro's own
-container and its automatically discovered `Requires:` name whatever that
-distro ships. The distro id lands in the RPM `Release` field
-(`coffer-0.1.0-1.fedora44.x86_64.rpm`), so the RPMs follow the same
-spelled-out naming as the `.deb` files without a rename step - RPM naming
-puts the `Release` field into the file name itself. `el9`/`el10` is the
-one abbreviation kept, since those packages serve RHEL, AlmaLinux, Rocky
-and Oracle alike. Tumbleweed being a rolling release, its RPM matches Tumbleweed as of
-the build - the rolling `latest` prerelease (rebuilt on every push to
-`main`) is the one to use there; a tagged release's Tumbleweed package goes
-stale the next time libfuse3 bumps. The RPMs are not GPG-signed, which
-`dnf` accepts for local files as is and `zypper` needs
+Oracle), openSUSE Leap 16.0 and Tumbleweed. The distro id lands in the RPM
+`Release` field (`coffer-0.1.0-1.fedora44.x86_64.rpm`), so the RPMs follow
+the same spelled-out naming as the `.deb` files without a rename step -
+RPM naming puts the `Release` field into the file name itself. `el9`/`el10`
+is the one abbreviation kept, since those packages serve RHEL, AlmaLinux,
+Rocky and Oracle alike. Tumbleweed being a rolling release, its RPM matches
+Tumbleweed as of the build - the rolling `latest` prerelease (rebuilt on
+every push to `main`) is the one to use there. The RPMs are not GPG-signed,
+which `dnf` accepts for local files as is and `zypper` needs
 `--allow-unsigned-rpm` for.
 
-**Why per-distro and not one universal package:** the first attempt built a
-single `.deb` inside `debian:12-slim` (the oldest target) on the theory that
-glibc and libfuse3 are both forward-compatible - a binary built against an
-older version runs fine on a newer system, so building against the oldest
-target's libraries should make one package installable everywhere. That's
-true for glibc (`libc6 (>= 2.34)` from the Debian 12 build is satisfied by
-all four targets), but **not** for libfuse3: Debian 12 and Ubuntu 24.04 ship
-it as SONAME 3 (package `libfuse3-3`), while Debian 13 and Ubuntu 26.04
-bumped it to SONAME 4 (package `libfuse3-4`) - and critically, `libfuse3-4`
-does *not* also ship a `libfuse3.so.3` symlink for backward compatibility.
-A binary linked against SONAME 3 can't load SONAME 4 or vice versa. This
-wasn't a theoretical concern - `test-install.sh` caught it immediately: the
-Debian-12-built package's `Depends: libfuse3-3` wasn't even resolvable on a
-fresh Debian 13 container, so `apt-get install` refused outright. Building
-natively per distro sidesteps the whole question - each package just
-depends on whatever that distro actually ships.
+**Runtime dependencies.** Exactly two: the C library, and the `fuse3`
+package for the `fusermount3` helper binary that `mount`/`umount` shell
+out to. `fusermount3` is easy to miss since `ldd` only reports linked
+libraries, not subprocesses - `test-install.sh` caught it by actually
+exercising `mount`/`umount` rather than just checking that the install
+succeeded. The `.deb` gets it from the explicit `depends` in `Cargo.toml`,
+the RPMs from the explicit `requires` there; the C library dependency is
+discovered automatically at build time by both.
 
-SQLCipher and OpenSSL are statically bundled into every build regardless
-(rusqlite's `bundled-sqlcipher-vendored-openssl` feature) rather than linked
-against the distro's `libsqlcipher-dev`, for two reasons: it removes a
-runtime dependency that would otherwise need separate version tracking
-across four distros, and it sidesteps the upstream 4GB bug above living in
-whichever SQLCipher build happens to be in a given distro's archive at the
-time. So libfuse3 ends up being the *only* runtime library dependency that
-varies by target.
+There is deliberately no libfuse dependency. `fuser` is used with its
+default, pure-Rust mount, which talks to `fusermount3` directly and links
+no `libfuse3.so`. The first releases were built with fuser's `libfuse3`
+feature instead, and that turned out to be the one runtime library that
+differs between the target distros: Debian 12, Ubuntu 24.04, EL9/EL10 and
+Fedora 43 ship libfuse 3.10-3.16 as SONAME 3 (`libfuse3-3`), while Debian
+13, Ubuntu 26.04, Fedora 44 and Tumbleweed have 3.17+ as SONAME 4
+(`libfuse3-4`, with no `libfuse3.so.3` compatibility symlink), and a binary
+linked against one cannot load the other - `test-install.sh` caught a
+Debian-12-built package whose `Depends: libfuse3-3` wasn't even resolvable
+on Debian 13. It also printed a spurious `fuse: warning: library too old,
+some operations may not work` on every SONAME-3 distro, because fuser
+hands `fuse_session_new()` an ops struct sized for libfuse 3.17. Dropping
+the feature removed both problems at once.
 
-The only runtime dependencies are `libc6`, `libfuse3-3`/`libfuse3-4`
-(whichever the target ships), and the `fuse3` package itself (for the
-`fusermount3` helper binary that `mount`/`umount` actually shell out to -
-it's a separate package from `libfuse3-N`, easy to miss since `ldd` only
-reports the linked *library*, not the subprocess dependency; this was also
-caught by `test-install.sh` actually exercising `mount`/`umount`, not just
-checking that install succeeds). The RPMs carry the same split: `fuse3` is
-declared explicitly in `Cargo.toml`, the library (`fuse3-libs` on
-Fedora/EL, `libfuse3-3`/`libfuse3-4` on openSUSE) comes in through RPM's
-automatic dependency discovery at build time.
+**Why still one package per distro.** With libfuse gone, a package built
+on the oldest target would in principle install everywhere (glibc is
+forward-compatible; `libc6 (>= 2.34)` from a Debian 12 build is satisfied
+by all newer targets). Building natively per distro is kept anyway: it
+costs nothing but CI minutes, every package is verified on exactly the
+distro it is meant for, and each one declares the C library version that
+distro actually ships instead of an artificially old floor.
 
-All four packages pass the full `test-install.sh` cycle (install, create,
-mount, write, read, unmount, check). On the two SONAME-3 targets (Debian 12,
-Ubuntu 24.04, both shipping libfuse3 3.14.0) `coffer mount` prints
-`fuse: warning: library too old, some operations may not work` - cosmetic,
-every operation in the test cycle (including the ones the warning calls
-out) works correctly regardless; it doesn't appear on the newer SONAME-4
-targets (Debian 13's 3.17.2, Ubuntu 26.04's 3.18.2).
+SQLCipher and OpenSSL are statically bundled into every build (rusqlite's
+`bundled-sqlcipher-vendored-openssl` feature) rather than linked against
+the distro's `libsqlcipher-dev`, for two reasons: it removes a runtime
+dependency that would otherwise need separate version tracking across ten
+distros, and it sidesteps the upstream 4GB bug above living in whichever
+SQLCipher build happens to be in a given distro's archive at the time.
+
+All packages pass the full `test-install.sh` cycle (install, create, mount,
+write, read, unmount, check) on every target and both architectures.
 
 ## Files in this repo
 

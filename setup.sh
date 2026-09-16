@@ -16,35 +16,27 @@ cd "$(dirname "$0")"
 SUDO=sudo
 [ "$(id -u)" -eq 0 ] && SUDO=""
 
+# No libfuse development package: fuser's pure-Rust mount links no libfuse
+# (see Cargo.toml). `fuse3` is still needed for the fusermount3 helper that
+# mount/umount shell out to at runtime. perl and make are for OpenSSL,
+# which is compiled from source (see below).
 echo "==> Installing system packages (build tools, fuse3)"
 if command -v apt-get >/dev/null 2>&1; then
     $SUDO apt-get update -qq
     $SUDO apt-get install -y \
-        build-essential pkg-config perl fuse3 libfuse3-dev curl ca-certificates
+        build-essential perl fuse3 curl ca-certificates
 elif command -v dnf >/dev/null 2>&1; then
     # --allowerasing: EL installs often carry curl-minimal, which conflicts
     # with the full curl package and would otherwise abort the whole step.
     $SUDO dnf install -y --allowerasing \
-        gcc make pkgconf-pkg-config perl fuse3 fuse3-devel curl ca-certificates
+        gcc make perl fuse3 curl ca-certificates
 elif command -v zypper >/dev/null 2>&1; then
     $SUDO zypper --non-interactive install --no-recommends \
-        gcc make pkg-config perl fuse3 fuse3-devel curl ca-certificates
+        gcc make perl fuse3 curl ca-certificates
 else
     echo "No supported package manager found (apt-get, dnf or zypper)." >&2
-    echo "Install manually instead: a C compiler, make, pkg-config, perl, fuse3 and the" >&2
-    echo "libfuse3 development package, curl - then a Rust toolchain via https://rustup.rs" >&2
-    echo "and run: make build" >&2
-    exit 1
-fi
-
-# Make sure the FUSE dev files actually resolve before spending minutes on
-# the build. This is the exact check fuser's build script performs, but its
-# own failure mode is an unhelpful panic buried in cargo output (e.g. when
-# PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR in the environment hide the system .pc
-# files, or on a derivative distro where the package name differs).
-if ! pkg-config --exists 'fuse3 >= 3.0.0'; then
-    echo "error: the libfuse3 development package is installed, but pkg-config cannot resolve 'fuse3'." >&2
-    echo "Check PKG_CONFIG_PATH / PKG_CONFIG_LIBDIR in your environment, then re-run ./setup.sh." >&2
+    echo "Install manually instead: a C compiler, make, perl, fuse3 (for fusermount3), curl -" >&2
+    echo "then a Rust toolchain via https://rustup.rs and run: make build" >&2
     exit 1
 fi
 

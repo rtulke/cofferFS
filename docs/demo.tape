@@ -16,7 +16,7 @@ Set Width 1300
 Set Height 500
 Set Padding 18
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 35ms
+Set TypingSpeed 45ms
 # English tool output regardless of the rendering host's locale.
 Env LC_ALL "C.UTF-8"
 
@@ -33,24 +33,24 @@ Sleep 800ms
 Type "correct horse battery staple" Enter
 Sleep 600ms
 Type "correct horse battery staple" Enter
-Sleep 1.5s
+Sleep 3s
 
 Type "coffer mount" Sleep 300ms Enter
 Sleep 800ms
 Type "correct horse battery staple" Enter
-Sleep 1.5s
+Sleep 3s
 
 Type "cp -r ~/Documents/tax-2025 ~/vault/ && ls -la ~/vault/tax-2025" Sleep 300ms Enter
-Sleep 2s
+Sleep 4s
 
 Type "coffer list" Sleep 300ms Enter
-Sleep 2s
+Sleep 4s
 
 Type "coffer umount" Sleep 300ms Enter
-Sleep 1.5s
+Sleep 3s
 
 Type "ls -la ~/.coffer/work.coffer" Sleep 300ms Enter
-Sleep 3s
+Sleep 5s
 
 # --- cleanup, not shown -----------------------------------------------------
 Hide

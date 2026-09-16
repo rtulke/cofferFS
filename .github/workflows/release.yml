@@ -53,7 +53,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            git build-essential pkg-config perl libfuse3-dev curl ca-certificates
+            git build-essential perl curl ca-certificates
 
       - uses: actions/checkout@v7
 
@@ -66,15 +66,13 @@ jobs:
             sh -s -- -y --default-toolchain stable --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      # One .deb per distro, built natively in that distro's own container -
-      # not one "universal" package. Debian 12/Ubuntu 24.04 ship libfuse3 as
-      # SONAME 3 (libfuse3-3); Debian 13/Ubuntu 26.04 bumped it to SONAME 4
-      # (libfuse3-4, with no libfuse3.so.3 symlink), so a binary linked
-      # against one can't dynamically load the other. Confirmed by testing:
-      # a Debian-12-built binary's Depends: isn't even resolvable on
-      # Debian 13. SQLCipher/OpenSSL are statically bundled in every build
-      # either way (see Cargo.toml), so libfuse3 is the only runtime library
-      # dependency that actually varies by target.
+      # One .deb per distro, built natively in that distro's own container.
+      # No libfuse development package: fuser's pure-Rust mount links no
+      # libfuse (see Cargo.toml), and SQLCipher/OpenSSL are statically
+      # bundled, so the only runtime dependencies are the C library and the
+      # fusermount3 helper from the fuse3 package. Building per distro is
+      # kept anyway so each package is verified on exactly the distro it is
+      # for and declares that distro's own glibc version - see REFERENCE.md.
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked --version "$CARGO_DEB_VERSION"
 
@@ -122,8 +120,7 @@ jobs:
           - { id: leap160, image: opensuse/leap:16.0, family: zypper }
           # Rolling release: a package built today matches today's
           # Tumbleweed. The rolling "latest" prerelease (rebuilt on every
-          # push to main) is the one Tumbleweed users should grab; a tagged
-          # release's Tumbleweed RPM goes stale whenever libfuse3 bumps.
+          # push to main) is the one Tumbleweed users should grab.
           - { id: tumbleweed, image: opensuse/tumbleweed, family: zypper }
           - { arch: amd64, runner: ubuntu-latest }
           - { arch: arm64, runner: ubuntu-24.04-arm }
@@ -134,7 +131,7 @@ jobs:
       # so cargo-generate-rpm's default auto-req finds the distro's own
       # /usr/lib/rpm/find-requires and emits exactly the versioned Requires:
       # that distro's packages carry, instead of its ldd-based fallback.
-      # fuse3-devel sits in AppStream on EL9/EL10 - no CRB needed.
+      # No fuse3-devel: nothing links libfuse (see Cargo.toml).
       # --allowerasing: the EL images ship curl-minimal, which conflicts
       # with the full curl package and makes a plain `dnf install curl`
       # fail outright ("problem with installed package curl-minimal").
@@ -143,10 +140,10 @@ jobs:
           if [ "${{ matrix.family }}" = zypper ]; then
             zypper --non-interactive --gpg-auto-import-keys refresh
             zypper --non-interactive install --no-recommends \
-              gcc make pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip
+              gcc make perl rpm-build git curl ca-certificates tar gzip
           else
             dnf install -y --allowerasing --setopt=install_weak_deps=False \
-              gcc make pkgconf-pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip
+              gcc make perl rpm-build git curl ca-certificates tar gzip
           fi
 
       - uses: actions/checkout@v7
@@ -163,11 +160,9 @@ jobs:
             sh -s -- -y --default-toolchain stable --profile minimal
           echo "$HOME/.cargo/bin:$PATH" >> "$GITHUB_PATH"
 
-      # One .rpm per distro, natively, for the same libfuse3 SONAME reason as
-      # the .deb side: EL9/EL10 and Fedora 43 are on fuse 3.10-3.16
-      # (libfuse3.so.3), Fedora 44 and Tumbleweed on 3.18 (libfuse3.so.4).
-      # Building natively means each package's auto-discovered Requires:
-      # simply names whatever that distro actually ships.
+      # One .rpm per distro, natively, same reasoning as the .deb side: each
+      # package's auto-discovered Requires: simply names whatever that
+      # distro actually ships, and each is verified on exactly that distro.
       - name: Install cargo-generate-rpm
         run: cargo install cargo-generate-rpm --locked --version "$CARGO_GENERATE_RPM_VERSION"
 
@@ -286,7 +281,7 @@ jobs:
       # Same docker flags and the same functional cycle as the .deb verify
       # job above (see there for why each flag is needed). A real `dnf
       # install` / `zypper install` of the local file, so the auto-discovered
-      # Requires: (libfuse3.so.N, glibc symbol versions) and the explicit
+      # Requires: (glibc symbol versions) and the explicit
       # fuse3 dependency actually have to resolve against this distro's
       # repos. zypper additionally needs --allow-unsigned-rpm since the
       # packages aren't GPG-signed; dnf accepts unsigned local files as is.

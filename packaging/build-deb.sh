@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
 # Builds one .deb per target distro, natively in that distro's own container.
 #
-# Why not one universal package: Debian 12/Ubuntu 24.04 ship libfuse3 as
-# SONAME 3 (package `libfuse3-3`), but Debian 13/Ubuntu 26.04 bumped it to
-# SONAME 4 (package `libfuse3-4`, and critically it does NOT also provide a
-# `libfuse3.so.3` symlink) - a binary linked against one SONAME can't
-# dynamically load the other. Confirmed by testing: a Debian-12-built binary
-# fails to install on Debian 13 at all (`Depends: libfuse3-3` isn't even
-# resolvable there). So each target gets its own native build, same as this
-# project's other packaging pipelines (see rtulke/rocket.chat-tray).
-#
-# SQLCipher/OpenSSL are still statically bundled in every build (see
-# Cargo.toml), so libfuse3 is the only runtime library dependency that
-# varies across targets.
+# Why one per distro: every package is verified on exactly the distro it is
+# for and declares that distro's own glibc version. Nothing else varies -
+# SQLCipher/OpenSSL are statically bundled and fuser's pure-Rust mount links
+# no libfuse (see Cargo.toml), so the only runtime dependencies are the C
+# library and the fusermount3 helper from the fuse3 package. See the
+# Packaging section in REFERENCE.md for the history behind this.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
@@ -43,7 +37,7 @@ for id in "${TARGET_IDS[@]}"; do
         bash -euxc '
             apt-get update -qq
             apt-get install -y --no-install-recommends \
-                build-essential pkg-config perl libfuse3-dev curl ca-certificates git
+                build-essential perl curl ca-certificates git
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
                 sh -s -- -y --default-toolchain stable --profile minimal
             source "$HOME/.cargo/env"

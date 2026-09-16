@@ -65,11 +65,11 @@ cd cofferFS
 ```
 
 `setup.sh` handles Debian/Ubuntu/Raspberry Pi OS, Fedora/EL and openSUSE.
-On anything else install `fuse3`, the libfuse3 development package
-(`libfuse3-dev` or `fuse3-devel`), `pkg-config`, `gcc`, `make` and `perl`,
-plus a current Rust toolchain via [rustup](https://rustup.rs) - the
-`rustc` shipped by most distros is too old for this project's
-dependencies. Then:
+On anything else install `fuse3` (for the `fusermount3` helper), `gcc`,
+`make` and `perl`, plus a current Rust toolchain via
+[rustup](https://rustup.rs) - the `rustc` shipped by most distros is too
+old for this project's dependencies. No libfuse development package is
+needed. Then:
 
 ```bash
 make build              # release binary, man page, shell completions

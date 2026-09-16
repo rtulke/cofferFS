@@ -11,21 +11,16 @@ CARGO_TARGET_DIR ?= target
 # gets involved (see `install` below for why root can't generate them).
 build: release man completions
 
-# Fail fast with a readable hint when the FUSE dev files or the Rust
-# toolchain aren't installed yet - the usual case when `make` is run on a
-# fresh machine before ./setup.sh. Without this, the first thing a user
-# sees is fuser's build-script panic ("Package fuse3 was not found in the
-# pkg-config search path"), several screens deep into cargo output.
+# Fail fast with a readable hint when the Rust toolchain isn't installed
+# yet - the usual case when `make` is run on a fresh machine before
+# ./setup.sh. No libfuse development files are needed: fuser's pure-Rust
+# mount links no libfuse (see Cargo.toml); only the fusermount3 helper
+# from the `fuse3` package is needed, and that at runtime.
 check-deps:
 	@command -v cargo >/dev/null 2>&1 || { \
 		echo "error: cargo not found." >&2; \
 		echo "Run ./setup.sh (installs a Rust toolchain via rustup), or if it is already installed:" >&2; \
 		echo "    source \$$HOME/.cargo/env" >&2; \
-		exit 1; }
-	@command -v pkg-config >/dev/null 2>&1 && pkg-config --exists 'fuse3 >= 3.0.0' || { \
-		echo "error: libfuse3 development files not found (pkg-config cannot resolve 'fuse3')." >&2; \
-		echo "Run ./setup.sh (Debian/Ubuntu), or install them manually:" >&2; \
-		echo "    sudo apt-get install pkg-config libfuse3-dev fuse3" >&2; \
 		exit 1; }
 
 release: check-deps

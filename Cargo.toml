@@ -14,7 +14,13 @@ anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = "4.6.6"
 daemonize = "0.5.0"
-fuser = { version = "0.18.0", features = ["libfuse3"] }
+# Default features on purpose: fuser's pure-Rust mount talks to the
+# fusermount3 helper directly and links no libfuse at all. The earlier
+# `libfuse3` feature dragged in a runtime dependency on libfuse3.so.3/.4
+# (a different SONAME per distro generation) and printed a spurious
+# "fuse: warning: library too old" on distros with libfuse < 3.17,
+# because fuser hands fuse_session_new() an ops struct sized for 3.17.
+fuser = "0.18.0"
 libc = "0.2.189"
 nix = { version = "0.31.3", features = ["fs"] }
 rpassword = "7.5.4"

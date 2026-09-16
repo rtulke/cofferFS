@@ -546,7 +546,7 @@ fn coffer_mounts() -> Vec<(String, u32)> {
         let (Some(fstype), Some(source)) = (tail.next(), tail.next()) else {
             continue;
         };
-        // libfuse3 registers the mount as type "fuse" with FSName as the
+        // fusermount3 registers the mount as type "fuse" with FSName as the
         // source ("coffer"); only a `subtype=` option would make the type
         // itself read "fuse.coffer", so accept both spellings.
         let ours = (fstype == "fuse" || fstype.starts_with("fuse.")) && source == "coffer";

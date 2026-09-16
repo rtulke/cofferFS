@@ -3,13 +3,12 @@
 # via cargo-generate-rpm. The RPM counterpart of build-deb.sh.
 #
 # Why one per distro and not a single "el9-built runs everywhere" package:
-# the same libfuse3 SONAME split as on the Debian side. EL9/EL10 and
-# Fedora 43 ship fuse 3.10-3.16 (libfuse3.so.3), while Fedora 44 and
-# Tumbleweed are on 3.18 (libfuse3.so.4), and a binary linked against one
-# can't load the other. Building natively per target means each package's
-# automatically discovered `Requires:` simply names whatever that distro
-# actually ships. SQLCipher/OpenSSL are statically bundled (see Cargo.toml),
-# so libfuse3 is the only runtime library dependency that varies.
+# every package is verified on exactly the distro it is for, and its
+# automatically discovered `Requires:` names that distro's own glibc
+# version. Nothing else varies - SQLCipher/OpenSSL are statically bundled
+# and fuser's pure-Rust mount links no libfuse (see Cargo.toml), so the
+# only runtime dependencies are the C library and the fusermount3 helper
+# from the fuse3 package. See the Packaging section in REFERENCE.md.
 #
 # The distro id goes into the RPM's Release field (`1.fedora44`, `1.el9`,
 # ...), so the file names come out as coffer-<version>-1.<id>.x86_64.rpm -
@@ -38,15 +37,15 @@ declare -A TARGET_IMAGES=(
 # Per package-manager family. rpm-build is installed so cargo-generate-rpm's
 # default `auto-req = "auto"` finds the distro's own /usr/lib/rpm/find-requires
 # and emits exactly the versioned `Requires:` that distro's packages carry,
-# instead of falling back to its ldd-based approximation. fuse3-devel sits in
-# AppStream on EL9/EL10 (no CRB needed) and in the main repo elsewhere.
+# instead of falling back to its ldd-based approximation. No fuse3-devel:
+# nothing links libfuse (see Cargo.toml).
 # --allowerasing: the EL images ship curl-minimal, which conflicts with the
 # full curl package and makes a plain `dnf install curl` fail outright.
 DNF_INSTALL='dnf install -y --allowerasing --setopt=install_weak_deps=False \
-    gcc make pkgconf-pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip'
+    gcc make perl rpm-build git curl ca-certificates tar gzip'
 ZYPPER_INSTALL='zypper --non-interactive --gpg-auto-import-keys refresh && \
     zypper --non-interactive install --no-recommends \
-    gcc make pkg-config perl fuse3-devel fuse3 rpm-build git curl ca-certificates tar gzip'
+    gcc make perl rpm-build git curl ca-certificates tar gzip'
 
 mkdir -p dist
 rm -f dist/coffer-*.rpm
