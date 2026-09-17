@@ -112,6 +112,18 @@ pub fn vacuum(con: &Connection) -> rusqlite::Result<()> {
     con.execute_batch("PRAGMA temp_store = FILE; VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
 }
 
+/// SQLCipher wires up its own diagnostics the first time it initialises
+/// (sqlcipher_extra_init: default level WARN, target stderr). A wrong
+/// password then dumps three `ERROR CORE ... hmac check failed` lines onto
+/// the terminal right before coffer's own "wrong password" message. The
+/// level is process-wide, so the first connection's PRAGMA is what counts;
+/// it is issued on every keyed connection anyway so no entry point can
+/// miss it. Nothing is lost: every condition SQLCipher logs at ERROR is
+/// also surfaced as an SQLite error code, which coffer already reports.
+fn silence_sqlcipher_log(con: &Connection) -> rusqlite::Result<()> {
+    con.execute_batch("PRAGMA cipher_log_level = NONE;")
+}
+
 pub fn create_container(path: &Path, password: &str, max_size: u64) -> Result<()> {
     if path.exists() {
         bail!("{} already exists", path.display());
@@ -123,6 +135,7 @@ pub fn create_container(path: &Path, password: &str, max_size: u64) -> Result<()
     }
 
     let con = Connection::open(path).context("creating container file")?;
+    silence_sqlcipher_log(&con)?;
     con.execute_batch(&pragma_key_sql("key", password))?;
     con.execute_batch("PRAGMA cipher_page_size = 4096;")?;
     con.execute_batch(SCHEMA)?;
@@ -179,6 +192,7 @@ pub fn open_db(path: &Path, password: &str, readonly: bool) -> Result<Connection
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_URI
     };
     let con = Connection::open_with_flags(&uri, flags)?;
+    silence_sqlcipher_log(&con)?;
     con.execute_batch(&pragma_key_sql("key", password))?;
 
     let check: rusqlite::Result<String> = con.query_row(
