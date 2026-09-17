@@ -245,7 +245,7 @@ check "umount by alias"    bash -c "'$COFFER' umount it >/dev/null && wait_unmou
 check "add --read-only alias" "$COFFER" add ro "$V" "$MNT" --password-file "$PW" --read-only
 check "mount ro alias"     bash -c "'$COFFER' mount ro >/dev/null && wait_mounted '$MNT'"
 expect_fail "ro alias refuses write" bash -c "echo x > '$MNT/nope'"
-check "umount ro alias"    bash -c "'$COFFER' umount ro >/dev/null && wait_unmounted '$MNT'"
+check "umount ro alias"    bash -c "'$COFFER' umount ro >/dev/null && wait_unmounted '$MNT' && wait_lock_free '$V'"
 check "remove alias"       "$COFFER" remove ro
 expect_fail "removed alias gone" bash -c "'$COFFER' list | grep -q '^ro '"
 check "--password-command" "$COFFER" info "$V" --password-command "cat $PW"
@@ -253,7 +253,7 @@ expect_fail "--password-command failing command" "$COFFER" info "$V" --password-
 expect_fail "--password-command empty output" "$COFFER" info "$V" --password-command true
 check "add --password-command alias" "$COFFER" add pc "$V" "$MNT" --password-command "cat $PW"
 check "mount via password_command" bash -c "'$COFFER' mount pc >/dev/null && wait_mounted '$MNT'"
-check "umount"             bash -c "'$COFFER' umount pc >/dev/null && wait_unmounted '$MNT'"
+check "umount"             bash -c "'$COFFER' umount pc >/dev/null && wait_unmounted '$MNT' && wait_lock_free '$V'"
 
 # ---------------------------------------------------------------------------
 section "extended attributes"
