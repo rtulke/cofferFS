@@ -10,6 +10,10 @@ description = "Growable, user-mountable encrypted single-file containers (SQLCip
 license = "MIT"
 authors = ["Robert Tulke <rt@debian.sh>"]
 repository = "https://github.com/rtulke/cofferFS"
+# Repository decoration nobody building from crates.io needs: the demo
+# animation and the social-preview card are a quarter of a megabyte of
+# images, and the CI workflows only mean anything inside the repository.
+exclude = ["docs/demo.gif", "docs/social-preview.png", ".github/"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
