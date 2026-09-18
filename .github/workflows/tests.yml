@@ -24,17 +24,25 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq fuse3 rsync perl attr python3 >/dev/null
 
-      # The newest tagged release, installed as the "previous version" for
-      # the suite's cross-version section: containers must keep opening in
-      # both directions. The runner is Ubuntu 24.04, hence that package.
-      - name: Install the previous release for the compatibility checks
+      # v0.1.2, the last release without the xattrs table, installed as the
+      # "previous version" for the suite's cross-version section: containers
+      # must keep opening in both directions, and the additive-table path
+      # (an old container written by this version, then opened by the old
+      # one again) must actually be exercised - which is why this is pinned
+      # rather than "newest release": once a newer release has the table
+      # itself, those checks would silently stop testing what they claim.
+      # The runner is Ubuntu 24.04, hence that package. Only in the upstream
+      # repository: a fork has no releases to download.
+      - name: Install v0.1.2 for the compatibility checks
+        if: github.repository == 'rtulke/cofferFS'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download --repo "$GITHUB_REPOSITORY" \
-            --pattern 'coffer_*_ubuntu2404_amd64.deb' --dir /tmp/prev
+          gh release download v0.1.2 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'coffer_0.1.2-1_ubuntu2404_amd64.deb' --dir /tmp/prev
           sudo apt-get install -y -qq /tmp/prev/coffer_*.deb >/dev/null
           /usr/bin/coffer --version
+          echo "COFFER_PREV=/usr/bin/coffer" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release --locked
@@ -43,4 +51,4 @@ jobs:
         run: cargo test --release --locked
 
       - name: Integration suite
-        run: COFFER_PREV=/usr/bin/coffer tests/integration.sh
+        run: tests/integration.sh

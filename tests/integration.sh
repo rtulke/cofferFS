@@ -94,6 +94,16 @@ check "rename dir"         mv "$MNT/a/b" "$MNT/a/bb"
 eq "file under renamed dir" "hello" "$(head -1 "$MNT/a/bb/c/g.txt")"
 check "rename over existing" bash -c "echo x > '$MNT/x'; echo y > '$MNT/y'; mv '$MNT/x' '$MNT/y'"
 eq "rename over existing content" "x" "$(cat "$MNT/y")"
+check "dirs for rename tests" bash -c "mkdir -p '$MNT/rd1' '$MNT/rd2' '$MNT/rd3' && echo f > '$MNT/rd2/f'"
+expect_fail "rename dir over non-empty dir is ENOTEMPTY" mv -T "$MNT/rd1" "$MNT/rd2"
+eq "non-empty target dir survived" "f" "$(cat "$MNT/rd2/f")"
+check "source dir survived too" test -d "$MNT/rd1"
+check "rename dir over empty dir"  mv -T "$MNT/rd1" "$MNT/rd3"
+expect_fail "old dir name gone" test -e "$MNT/rd1"
+check "renamed dir usable" bash -c "echo g > '$MNT/rd3/g' && rm -r '$MNT/rd3' '$MNT/rd2'"
+# The kernel caches attributes for one second (fs.rs TTL); the mode change
+# from the write is visible after that, so the check waits it out.
+check "setuid bit is dropped by a write" bash -c "echo s > '$MNT/suid' && chmod 4755 '$MNT/suid' && [ \"\$(stat -c %a '$MNT/suid')\" = 4755 ] && echo more >> '$MNT/suid' && sleep 1.5 && [ \"\$(stat -c %a '$MNT/suid')\" = 755 ]"
 check "symlink"            ln -s a/bb/c/g.txt "$MNT/link"
 eq "readlink" "a/bb/c/g.txt" "$(readlink "$MNT/link")"
 eq "read through symlink" "hello" "$(head -1 "$MNT/link")"
@@ -327,9 +337,12 @@ if [ -n "${COFFER_PREV:-}" ] && [ -x "$COFFER_PREV" ]; then
     check "previous version mounts it" bash -c "'$COFFER_PREV' mount '$OLDV' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
     eq "previous version reads our file" "new" "$(cat "$OLDM/from-new")"
     check "previous version writes"   bash -c "echo old > '$OLDM/from-old'"
+    check "previous version deletes the file with our xattr" rm "$OLDM/from-new"
     check "umount (previous version)" bash -c "'$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$OLDV'"
     check "this version mounts it again" mnt "$OLDV" "$OLDM"
-    eq "our xattr survived the round trip" "v" "$(getfattr -n user.k --only-values "$OLDM/from-new" 2>/dev/null)"
+    expect_fail "the deleted file stays deleted" test -e "$OLDM/from-new"
+    check "re-create the same name: no stale xattr" bash -c "echo again > '$OLDM/from-new'"
+    expect_fail "no xattr resurfaces on the new file" getfattr -n user.k "$OLDM/from-new"
     eq "previous version's file is there" "old" "$(cat "$OLDM/from-old")"
     check "umount"                    umnt "$OLDV" "$OLDM"
     check "previous version mounts this version's container" bash -c "'$COFFER_PREV' mount '$V' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
@@ -337,7 +350,16 @@ if [ -n "${COFFER_PREV:-}" ] && [ -x "$COFFER_PREV" ]; then
     check "umount (previous version)" bash -c "'$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$V'"
     check "previous version checks this version's container" "$COFFER_PREV" check "$V" --password-file "$PW"
     check "read-only mount of a container without the xattrs table" bash -c "'$COFFER_PREV' create '$WORK/old2.coffer' --password-file '$PW' >/dev/null && '$COFFER' mount '$WORK/old2.coffer' '$OLDM' -r --password-file '$PW' --log '$LOG' >/dev/null && wait_mounted '$OLDM'"
-    eq "listxattr is empty there" "" "$(getfattr -d "$OLDM" 2>/dev/null)"
+    check "listxattr answers (empty) there" getfattr -d "$OLDM"
+    check "getxattr there is ENODATA, not EIO (python)" python3 - "$OLDM" <<'PY'
+import os, sys
+p = sys.argv[1]
+assert os.listxattr(p) == [], os.listxattr(p)
+try:
+    os.getxattr(p, "user.nope"); sys.exit("getxattr succeeded on a container without the table")
+except OSError as e:
+    assert e.errno == 61, e     # ENODATA, the "no such attribute" answer
+PY
     check "umount"                    umnt "$WORK/old2.coffer" "$OLDM"
 else
     echo; echo "== compatibility: skipped (set COFFER_PREV to a previous release's binary)"

@@ -1,8 +1,8 @@
 use crate::db::{self, BLOCK_SIZE, KIND_DIR, KIND_FILE, KIND_SYMLINK, ROOT_INO};
 use fuser::{
-    Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, ReplyXattr, Request, TimeOrNow,
+    Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, InitFlags,
+    KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::ffi::OsStr;
@@ -178,6 +178,17 @@ fn insert_child(
     Ok(new_ino)
 }
 
+/// Everything an inode owns, gone in one place: its blocks, its extended
+/// attributes (also covered by the xattrs_gc trigger, kept explicit so the
+/// intent is visible here) and the inode row itself. unlink, rmdir and a
+/// rename over an existing entry all end up here.
+fn delete_inode(con: &Connection, ino: u64) -> rusqlite::Result<()> {
+    con.prepare_cached("DELETE FROM data WHERE ino=?1")?.execute(params![ino as i64])?;
+    con.prepare_cached("DELETE FROM xattrs WHERE ino=?1")?.execute(params![ino as i64])?;
+    con.prepare_cached("DELETE FROM inodes WHERE ino=?1")?.execute(params![ino as i64])?;
+    Ok(())
+}
+
 fn truncate_inode(con: &Connection, ino: u64, length: u64) -> rusqlite::Result<()> {
     let last_block = (length / BLOCK_SIZE as u64) as i64;
     let last_off = (length % BLOCK_SIZE as u64) as usize;
@@ -243,12 +254,6 @@ fn to_attr(ino: u64, row: &InodeRow) -> FileAttr {
     }
 }
 
-// Every DB error elsewhere in this file collapses to EIO, which is fine for
-// operations that only ever touch a row or two of metadata. write()/create()
-// are the paths that can plausibly move enough data to hit a genuinely full
-// host disk (relevant when --max-size is unset, i.e. "grows until host disk
-// is full") - callers/tools checking for ENOSPC specifically (cp, GUI file
-// managers) deserve the real errno there instead of a generic I/O error.
 /// The size protocol shared by getxattr and listxattr: with size 0 the
 /// caller only wants to know how big the answer is; otherwise the answer
 /// must fit or it's ERANGE.
@@ -262,6 +267,12 @@ fn reply_xattr(reply: ReplyXattr, size: u32, data: &[u8]) {
     }
 }
 
+// Every DB error elsewhere in this file collapses to EIO, which is fine for
+// operations that only ever touch a row or two of metadata. write()/create()
+// are the paths that can plausibly move enough data to hit a genuinely full
+// host disk (relevant when --max-size is unset, i.e. "grows until host disk
+// is full") - callers/tools checking for ENOSPC specifically (cp, GUI file
+// managers) deserve the real errno there instead of a generic I/O error.
 fn errno_for(e: &rusqlite::Error) -> Errno {
     if let rusqlite::Error::SqliteFailure(inner, _) = e {
         if inner.code == rusqlite::ErrorCode::DiskFull {
@@ -274,6 +285,19 @@ fn errno_for(e: &rusqlite::Error) -> Errno {
 // --- the actual FUSE filesystem --------------------------------------------
 
 impl Filesystem for CofferFS {
+    // Once a filesystem answers getxattr at all (ENODATA rather than
+    // ENOSYS), the kernel asks it for `security.capability` before every
+    // buffered write to decide whether file capabilities must be dropped -
+    // one extra round trip per write(2), serialised on the single FUSE
+    // thread. FUSE_HANDLE_KILLPRIV_V2 (kernel 5.11+) moves that duty here:
+    // the kernel stops asking and instead flags writes that must clear
+    // setuid/setgid and `security.capability` (see write()). Older kernels
+    // reject the capability, which just leaves the round trip in place.
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
+        let _ = config.add_capabilities(InitFlags::FUSE_HANDLE_KILLPRIV_V2);
+        Ok(())
+    }
+
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         self.touch();
         let Some(name) = name.to_str() else {
@@ -495,18 +519,7 @@ impl Filesystem for CofferFS {
             }
         };
         let now = db::now_secs();
-        let ok = tx
-            .prepare_cached("DELETE FROM data WHERE ino=?1")
-            .and_then(|mut s| s.execute(params![ino as i64]))
-            .is_ok()
-            && tx
-                .prepare_cached("DELETE FROM xattrs WHERE ino=?1")
-                .and_then(|mut s| s.execute(params![ino as i64]))
-                .is_ok()
-            && tx
-                .prepare_cached("DELETE FROM inodes WHERE ino=?1")
-                .and_then(|mut s| s.execute(params![ino as i64]))
-                .is_ok()
+        let ok = delete_inode(&tx, ino).is_ok()
             && tx
                 .prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino=?2")
                 .and_then(|mut s| s.execute(params![now, parent.0 as i64]))
@@ -563,14 +576,7 @@ impl Filesystem for CofferFS {
             }
         }
         let now = db::now_secs();
-        let ok = tx
-            .prepare_cached("DELETE FROM xattrs WHERE ino=?1")
-            .and_then(|mut s| s.execute(params![ino as i64]))
-            .is_ok()
-            && tx
-                .prepare_cached("DELETE FROM inodes WHERE ino=?1")
-                .and_then(|mut s| s.execute(params![ino as i64]))
-                .is_ok()
+        let ok = delete_inode(&tx, ino).is_ok()
             && tx
                 .prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino=?2")
                 .and_then(|mut s| s.execute(params![now, parent.0 as i64]))
@@ -675,17 +681,41 @@ impl Filesystem for CofferFS {
                 return;
             }
         };
-        if let Ok(Some(existing)) = child_ino(&tx, newparent.0, newname) {
-            if existing != ino {
-                let _ = tx
-                    .prepare_cached("DELETE FROM data WHERE ino=?1")
-                    .and_then(|mut s| s.execute(params![existing as i64]));
-                let _ = tx
-                    .prepare_cached("DELETE FROM xattrs WHERE ino=?1")
-                    .and_then(|mut s| s.execute(params![existing as i64]));
-                let _ = tx
-                    .prepare_cached("DELETE FROM inodes WHERE ino=?1")
-                    .and_then(|mut s| s.execute(params![existing as i64]));
+        // Renaming over an existing entry replaces it. The kernel already
+        // rules out file-over-directory (EISDIR) and directory-over-file
+        // (ENOTDIR); what it leaves to the filesystem is that a directory
+        // may only be replaced while empty (ENOTEMPTY) - otherwise its
+        // whole subtree would be orphaned: rows still present, reachable
+        // by nothing.
+        match child_ino(&tx, newparent.0, newname) {
+            Ok(Some(existing)) if existing != ino => {
+                match row_by_ino(&tx, existing) {
+                    Ok(Some(row)) if row.kind == KIND_DIR => match has_children(&tx, existing) {
+                        Ok(true) => {
+                            reply.error(Errno::ENOTEMPTY);
+                            return;
+                        }
+                        Ok(false) => {}
+                        Err(_) => {
+                            reply.error(Errno::EIO);
+                            return;
+                        }
+                    },
+                    Ok(_) => {}
+                    Err(_) => {
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                }
+                if delete_inode(&tx, existing).is_err() {
+                    reply.error(Errno::EIO);
+                    return;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
             }
         }
         let now = db::now_secs();
@@ -846,7 +876,7 @@ impl Filesystem for CofferFS {
         fh: FileHandle,
         offset: u64,
         data: &[u8],
-        _write_flags: fuser::WriteFlags,
+        write_flags: WriteFlags,
         _flags: fuser::OpenFlags,
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
@@ -923,6 +953,26 @@ impl Filesystem for CofferFS {
         if let Err(e) = update_result {
             reply.error(errno_for(&e));
             return;
+        }
+        // Our side of FUSE_HANDLE_KILLPRIV_V2 (see init()): a write by a
+        // caller without CAP_FSETID drops setuid/setgid and any file
+        // capability, like every other Linux filesystem does. The kernel
+        // sets the flag on practically every unprivileged write, so both
+        // statements are written to be no-ops unless there is something to
+        // drop - a primary-key probe each. 3072 is S_ISUID | S_ISGID
+        // (04000 | 02000); SQLite has no octal literals.
+        if write_flags.contains(WriteFlags::FUSE_WRITE_KILL_SUIDGID) {
+            let killed = tx
+                .prepare_cached("UPDATE inodes SET mode = mode & ~3072 WHERE ino=?1 AND (mode & 3072) != 0")
+                .and_then(|mut s| s.execute(params![ino as i64]))
+                .and_then(|_| {
+                    tx.prepare_cached("DELETE FROM xattrs WHERE ino=?1 AND name='security.capability'")?
+                        .execute(params![ino as i64])
+                });
+            if let Err(e) = killed {
+                reply.error(errno_for(&e));
+                return;
+            }
         }
         if let Err(e) = tx.commit() {
             reply.error(errno_for(&e));

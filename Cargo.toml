@@ -32,6 +32,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
+[dev-dependencies]
+tempfile = "3"
+
 [package.metadata.deb]
 maintainer = "Robert Tulke <rt@debian.sh>"
 copyright = "2026, Robert Tulke <rt@debian.sh>"

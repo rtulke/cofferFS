@@ -50,6 +50,11 @@ CREATE TABLE data (
 /// schema above so it can be added to existing containers on open (see
 /// `open_db`): `CREATE TABLE IF NOT EXISTS` is a no-op on a container that
 /// already has it and an additive change on one from before 0.1.3.
+///
+/// The trigger keeps the table consistent no matter which version deletes
+/// an inode: it lives in the schema, so a `DELETE FROM inodes` issued by a
+/// coffer from before the table existed drops the inode's attributes too.
+/// Without it an older version's unlink would leave orphan rows behind.
 const XATTRS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS xattrs (
     ino   INTEGER NOT NULL,
@@ -57,6 +62,10 @@ CREATE TABLE IF NOT EXISTS xattrs (
     value BLOB NOT NULL,
     PRIMARY KEY (ino, name)
 ) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS xattrs_gc AFTER DELETE ON inodes
+BEGIN
+    DELETE FROM xattrs WHERE ino = OLD.ino;
+END;
 ";
 
 /// Whether the container has the `xattrs` table. Always true after a
@@ -295,4 +304,80 @@ another host.",
         return Err(err).context("acquiring lock");
     }
     Ok(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_container() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.coffer");
+        create_container(&path, "test-password", 0).unwrap();
+        (dir, path)
+    }
+
+    /// The xattrs_gc trigger is what keeps an older coffer - one that does
+    /// not know the xattrs table - from leaving orphan rows when it deletes
+    /// an inode with a plain `DELETE FROM inodes`. Exercised here exactly
+    /// that way, without going through fs.rs.
+    #[test]
+    fn deleting_an_inode_row_drops_its_xattrs() {
+        let (_dir, path) = temp_container();
+        let con = open_db(&path, "test-password", false).unwrap();
+        con.execute(
+            "INSERT INTO inodes (parent, name, kind, mode, uid, gid, size, atime, mtime, ctime) \
+             VALUES (1, 'f', ?1, 420, 0, 0, 0, 0.0, 0.0, 0.0)",
+            rusqlite::params![KIND_FILE],
+        )
+        .unwrap();
+        let ino: i64 = con.query_row("SELECT ino FROM inodes WHERE name='f'", [], |r| r.get(0)).unwrap();
+        con.execute(
+            "INSERT INTO xattrs (ino, name, value) VALUES (?1, 'user.a', x'01'), (?1, 'user.b', x'02')",
+            rusqlite::params![ino],
+        )
+        .unwrap();
+        let count = |c: &Connection| -> i64 {
+            c.query_row("SELECT count(*) FROM xattrs WHERE ino=?1", rusqlite::params![ino], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count(&con), 2);
+        con.execute("DELETE FROM inodes WHERE ino=?1", rusqlite::params![ino]).unwrap();
+        assert_eq!(count(&con), 0, "trigger must remove the inode's xattr rows");
+    }
+
+    /// A container created before the xattrs table existed gets it on the
+    /// first writable open, and never on a read-only one.
+    #[test]
+    fn xattrs_table_is_added_on_writable_open_only() {
+        let (_dir, path) = temp_container();
+        {
+            let con = open_db(&path, "test-password", false).unwrap();
+            con.execute_batch("DROP TRIGGER xattrs_gc; DROP TABLE xattrs;").unwrap();
+            assert!(!has_xattrs(&con));
+        }
+        {
+            let con = open_db(&path, "test-password", true).unwrap();
+            assert!(!has_xattrs(&con), "read-only open must not add the table");
+        }
+        {
+            let con = open_db(&path, "test-password", false).unwrap();
+            assert!(has_xattrs(&con), "writable open adds the table");
+            let trigger: i64 = con
+                .query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='xattrs_gc'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(trigger, 1);
+        }
+    }
+
+    #[test]
+    fn wrong_password_and_newer_schema_are_refused() {
+        let (_dir, path) = temp_container();
+        assert!(open_db(&path, "not-the-password", true).is_err());
+        {
+            let con = open_db(&path, "test-password", false).unwrap();
+            con.execute("UPDATE meta SET value='99' WHERE key='schema_version'", []).unwrap();
+        }
+        let err = open_db(&path, "test-password", true).unwrap_err().to_string();
+        assert!(err.contains("format version 99"), "{err}");
+    }
 }

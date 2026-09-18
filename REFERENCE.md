@@ -90,13 +90,25 @@ it, and travel with `cp --preserve=xattr`, `rsync -X` and `coffer backup`.
 The table is an additive extra, not a schema version bump: a writable open
 creates it when missing (`CREATE TABLE IF NOT EXISTS`), and a version of
 `coffer` from before 0.1.3 never looks at it - it only reads `meta`,
-`inodes` and `data` - so containers keep opening in both directions.
-The one visible difference is that an older `coffer` unlinking a file
-leaves that file's attribute rows behind; they are harmless orphans, a
-few bytes each, and `compact` does not need them gone. A read-only mount
-of a container that predates the table simply reports no attributes. The
-integration suite exercises exactly this cross-version round trip against
-the previous release.
+`inodes` and `data` - so containers keep opening in both directions. A
+trigger created alongside the table (`xattrs_gc`, after delete on
+`inodes`) drops an inode's attributes whenever its row goes, and since the
+trigger lives in the database it also fires for an older `coffer` that
+unlinks the file, so no orphan rows are left behind either way. A
+read-only mount of a container that predates the table simply reports no
+attributes. Names must be valid UTF-8, like file names in a container.
+The integration suite exercises exactly this cross-version round trip
+against the 0.1.2 release, in both directions.
+
+One consequence of answering `getxattr` at all: the kernel would then ask
+for `security.capability` before every buffered write, to know whether
+file capabilities must be dropped - an extra round trip per `write(2)`,
+serialised on the single FUSE thread. `coffer` therefore negotiates
+`FUSE_HANDLE_KILLPRIV_V2` (Linux 5.11+) and does that job itself: a write
+by a process without `CAP_FSETID` clears the setuid/setgid bits and the
+`security.capability` attribute, as on any other filesystem, and the
+kernel stops asking. Older kernels refuse the capability and keep the
+round trip.
 
 ## Registered vaults (`~/.coffer/config`)
 
