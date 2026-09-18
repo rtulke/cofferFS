@@ -104,11 +104,30 @@ One consequence of answering `getxattr` at all: the kernel would then ask
 for `security.capability` before every buffered write, to know whether
 file capabilities must be dropped - an extra round trip per `write(2)`,
 serialised on the single FUSE thread. `coffer` therefore negotiates
-`FUSE_HANDLE_KILLPRIV_V2` (Linux 5.11+) and does that job itself: a write
-by a process without `CAP_FSETID` clears the setuid/setgid bits and the
-`security.capability` attribute, as on any other filesystem, and the
-kernel stops asking. Older kernels refuse the capability and keep the
-round trip.
+`FUSE_HANDLE_KILLPRIV_V2` (Linux 5.11+) and takes the job over, which
+means doing all of it: a write, a truncate or a `chown` drops the setuid
+bit and the `security.capability` attribute, and the setgid bit as well
+*if the file is group-executable* - without that bit `S_ISGID` marks
+mandatory locking rather than a privilege, and Linux leaves it alone.
+Truncates by a caller with `CAP_FSETID` (root stands in for it here) keep
+the bits, as they do on any other filesystem, and a `chmod` in the same
+request always wins over the drop. For writes the kernel says when;
+`fuser` surfaces no such flag for truncate and chown, so `coffer` applies
+the rule itself. Older kernels refuse the capability and keep the round
+trip.
+
+### renameat2 flags
+
+`rename(2)` replaces an existing target, but `renameat2(2)` lets the
+caller ask for something else, and a filesystem that ignores those flags
+quietly destroys data. `RENAME_NOREPLACE` - what `mv -n` uses - is
+answered with `EEXIST` when the target exists. `RENAME_EXCHANGE` (an
+atomic swap) and `RENAME_WHITEOUT` are not implemented and are refused
+with `EINVAL` rather than silently doing something else. A directory can
+only be replaced while it is empty (`ENOTEMPTY`); the kernel rules out
+directory-over-file and file-over-directory itself, but leaves that one
+to the filesystem, and getting it wrong orphans the target's whole
+subtree inside the container.
 
 ## Registered vaults (`~/.coffer/config`)
 

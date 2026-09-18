@@ -2,7 +2,7 @@ use crate::db::{self, BLOCK_SIZE, KIND_DIR, KIND_FILE, KIND_SYMLINK, ROOT_INO};
 use fuser::{
     Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, InitFlags,
     KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    RenameFlags, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::ffi::OsStr;
@@ -178,6 +178,48 @@ fn insert_child(
     Ok(new_ino)
 }
 
+/// A directory may only be removed, or replaced by a rename, while it is
+/// empty. The kernel rules out directory-over-file and file-over-directory
+/// itself but leaves this one to the filesystem, and getting it wrong
+/// orphans the whole subtree: rows still there, reachable by nothing.
+/// Shared by rmdir and rename so the answer can only be decided once.
+fn ensure_removable(con: &Connection, ino: u64) -> Result<(), Errno> {
+    let kind: rusqlite::Result<i64> = con
+        .prepare_cached("SELECT kind FROM inodes WHERE ino=?1")
+        .and_then(|mut s| s.query_row(params![ino as i64], |r| r.get(0)));
+    match kind {
+        Ok(KIND_DIR) => match has_children(con, ino) {
+            Ok(true) => Err(Errno::ENOTEMPTY),
+            Ok(false) => Ok(()),
+            Err(_) => Err(Errno::EIO),
+        },
+        Ok(_) => Ok(()),
+        Err(_) => Err(Errno::EIO),
+    }
+}
+
+/// Drop what a modification has to drop from a file: the setuid bit, the
+/// setgid bit *if the file is group-executable* (without that bit S_ISGID
+/// marks mandatory locking, not a privilege, and Linux leaves it alone),
+/// and the `security.capability` attribute. Because coffer negotiates
+/// FUSE_HANDLE_KILLPRIV_V2 (see init()) the kernel stops doing this and
+/// hands the duty here - for writes, truncates and chowns alike.
+///
+/// SQLite has no octal literals: 2048 is S_ISUID (04000), 1024 S_ISGID
+/// (02000), 8 S_IXGRP (010). Each statement is a no-op unless there is
+/// something to drop, so the common case costs three primary-key probes.
+fn kill_priv(con: &Connection, ino: u64) -> rusqlite::Result<()> {
+    con.prepare_cached("UPDATE inodes SET mode = mode & ~2048 WHERE ino=?1 AND (mode & 2048) != 0")?
+        .execute(params![ino as i64])?;
+    con.prepare_cached(
+        "UPDATE inodes SET mode = mode & ~1024 WHERE ino=?1 AND (mode & 1024) != 0 AND (mode & 8) != 0",
+    )?
+    .execute(params![ino as i64])?;
+    con.prepare_cached("DELETE FROM xattrs WHERE ino=?1 AND name='security.capability'")?
+        .execute(params![ino as i64])?;
+    Ok(())
+}
+
 /// Everything an inode owns, gone in one place: its blocks, its extended
 /// attributes (also covered by the xattrs_gc trigger, kept explicit so the
 /// intent is visible here) and the inode row itself. unlink, rmdir and a
@@ -328,7 +370,7 @@ impl Filesystem for CofferFS {
     #[allow(clippy::too_many_arguments)]
     fn setattr(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -412,6 +454,24 @@ impl Filesystem for CofferFS {
                 .prepare_cached("UPDATE inodes SET atime=?1, mtime=?2 WHERE ino=?3")
                 .and_then(|mut s| s.execute(params![a, m, ino.0 as i64]))
                 .is_ok();
+        }
+
+        // The other half of FUSE_HANDLE_KILLPRIV_V2 (see init()): the
+        // capability makes the filesystem responsible for dropping
+        // setuid/setgid and file capabilities on write, truncate *and*
+        // chown. For write the kernel flags the request; for these two it
+        // does not, and fuser 0.18 surfaces neither FATTR_KILL_SUIDGID nor
+        // FUSE_OPEN_KILL_SUIDGID, so the rule is applied here, matching
+        // what the VFS would have done:
+        //   - truncate: by a caller without CAP_FSETID (uid 0 stands in for
+        //     the capability, as coffer has no way to ask for the real one),
+        //   - chown of a non-directory: always, privileged or not,
+        //   - never when the same call sets the mode explicitly: an
+        //     intentional `chmod u+s` must not be undone by its own request.
+        let truncating = size.is_some() && req.uid() != 0;
+        let chowning = (uid.is_some() || gid.is_some()) && row.kind != KIND_DIR;
+        if mode.is_none() && (truncating || chowning) {
+            ok &= kill_priv(&tx, ino.0).is_ok();
         }
 
         if !ok || tx.commit().is_err() {
@@ -564,16 +624,9 @@ impl Filesystem for CofferFS {
             reply.error(Errno::EBUSY);
             return;
         }
-        match has_children(&tx, ino) {
-            Ok(true) => {
-                reply.error(Errno::ENOTEMPTY);
-                return;
-            }
-            Ok(false) => {}
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
+        if let Err(e) = ensure_removable(&tx, ino) {
+            reply.error(e);
+            return;
         }
         let now = db::now_secs();
         let ok = delete_inode(&tx, ino).is_ok()
@@ -650,7 +703,7 @@ impl Filesystem for CofferFS {
         name: &OsStr,
         newparent: INodeNo,
         newname: &OsStr,
-        _flags: fuser::RenameFlags,
+        flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
         self.touch();
@@ -681,41 +734,41 @@ impl Filesystem for CofferFS {
                 return;
             }
         };
-        // Renaming over an existing entry replaces it. The kernel already
-        // rules out file-over-directory (EISDIR) and directory-over-file
-        // (ENOTDIR); what it leaves to the filesystem is that a directory
-        // may only be replaced while empty (ENOTEMPTY) - otherwise its
-        // whole subtree would be orphaned: rows still present, reachable
-        // by nothing.
-        match child_ino(&tx, newparent.0, newname) {
-            Ok(Some(existing)) if existing != ino => {
-                match row_by_ino(&tx, existing) {
-                    Ok(Some(row)) if row.kind == KIND_DIR => match has_children(&tx, existing) {
-                        Ok(true) => {
-                            reply.error(Errno::ENOTEMPTY);
-                            return;
-                        }
-                        Ok(false) => {}
-                        Err(_) => {
-                            reply.error(Errno::EIO);
-                            return;
-                        }
-                    },
-                    Ok(_) => {}
-                    Err(_) => {
-                        reply.error(Errno::EIO);
-                        return;
-                    }
+        // Renaming over an existing entry replaces it - unless the caller
+        // used renameat2(2) to ask for something else. RENAME_NOREPLACE
+        // ("don't overwrite", what `mv -n` uses) must fail with EEXIST
+        // instead of deleting the target; RENAME_EXCHANGE (an atomic swap)
+        // and RENAME_WHITEOUT are not implemented, and saying so with
+        // EINVAL is what a filesystem does for a rename flag it does not
+        // support. Silently ignoring either destroys the target.
+        let target = match child_ino(&tx, newparent.0, newname) {
+            Ok(t) => t,
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        if flags.intersects(RenameFlags::RENAME_EXCHANGE | RenameFlags::RENAME_WHITEOUT) {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+        if flags.contains(RenameFlags::RENAME_NOREPLACE) && target.is_some() {
+            reply.error(Errno::EEXIST);
+            return;
+        }
+        if let Some(existing) = target {
+            if existing != ino {
+                // The kernel already rules out file-over-directory (EISDIR)
+                // and directory-over-file (ENOTDIR); a directory may only be
+                // replaced while empty.
+                if let Err(e) = ensure_removable(&tx, existing) {
+                    reply.error(e);
+                    return;
                 }
                 if delete_inode(&tx, existing).is_err() {
                     reply.error(Errno::EIO);
                     return;
                 }
-            }
-            Ok(_) => {}
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
             }
         }
         let now = db::now_secs();
@@ -954,22 +1007,10 @@ impl Filesystem for CofferFS {
             reply.error(errno_for(&e));
             return;
         }
-        // Our side of FUSE_HANDLE_KILLPRIV_V2 (see init()): a write by a
-        // caller without CAP_FSETID drops setuid/setgid and any file
-        // capability, like every other Linux filesystem does. The kernel
-        // sets the flag on practically every unprivileged write, so both
-        // statements are written to be no-ops unless there is something to
-        // drop - a primary-key probe each. 3072 is S_ISUID | S_ISGID
-        // (04000 | 02000); SQLite has no octal literals.
+        // Our side of FUSE_HANDLE_KILLPRIV_V2 (see init()). Here the kernel
+        // says when: it sets the flag for a writer without CAP_FSETID.
         if write_flags.contains(WriteFlags::FUSE_WRITE_KILL_SUIDGID) {
-            let killed = tx
-                .prepare_cached("UPDATE inodes SET mode = mode & ~3072 WHERE ino=?1 AND (mode & 3072) != 0")
-                .and_then(|mut s| s.execute(params![ino as i64]))
-                .and_then(|_| {
-                    tx.prepare_cached("DELETE FROM xattrs WHERE ino=?1 AND name='security.capability'")?
-                        .execute(params![ino as i64])
-                });
-            if let Err(e) = killed {
+            if let Err(e) = kill_priv(&tx, ino) {
                 reply.error(errno_for(&e));
                 return;
             }

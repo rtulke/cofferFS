@@ -50,5 +50,11 @@ jobs:
       - name: Unit tests
         run: cargo test --release --locked
 
+      # Without a previous release to compare against, the suite's
+      # cross-version section would silently not run - it fails instead,
+      # unless told that there is nothing to compare with (a fork, where
+      # the step above is skipped).
       - name: Integration suite
+        env:
+          COFFER_PREV_OPTIONAL: ${{ github.repository == 'rtulke/cofferFS' && '' || '1' }}
         run: tests/integration.sh

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # End-to-end suite against a real mount. Everything a user could do to a
 # container is done here for real: create, mount (daemonized), write, read,
-# rename, truncate, sparse files, symlinks, rsync round-trips, unmount and
-# remount for persistence, read-only mounts, the idle unmount, a live
-# backup, a hard kill of the mount daemon mid-write with a check
-# afterwards, passwd, compact, the registry, --password-command.
+# rename (including the renameat2 flags), truncate, sparse files,
+# symlinks, extended attributes, the setuid/setgid drop on modification,
+# rsync round-trips, unmount and remount for persistence, read-only
+# mounts, the idle unmount, a live backup, a hard kill of the mount daemon
+# mid-write with a check afterwards, passwd, compact, the registry and
+# --password-command. With COFFER_PREV set, also a cross-version round
+# trip against that release.
 #
 #     tests/integration.sh                      # target/release/coffer
 #     COFFER=/usr/bin/coffer tests/integration.sh
@@ -44,6 +47,11 @@ wait_unmounted(){ for _ in $(seq 1 "${2:-50}"); do is_mounted "$1" || return 0; 
 lock_free()     { flock -n "$1" true; }
 wait_lock_free(){ for _ in $(seq 1 50); do lock_free "$1" && return 0; sleep 0.2; done; return 1; }
 daemon_pid()    { pgrep -f "coffer mount $1 " | head -1; }
+# The kernel caches attributes (fs.rs TTL), so a mode change made by the
+# filesystem itself - dropping setuid on write, say - becomes visible to
+# stat only once that cache expires. Poll instead of hardcoding the TTL.
+wait_mode()     { for _ in $(seq 1 40); do [ "$(stat -c %a "$1")" = "$2" ] && return 0; sleep 0.25; done; return 1; }
+export -f wait_mode
 # A few checks run inside `bash -c` (to chain commands); functions and the
 # variables they use have to be exported to be visible there.
 export -f is_mounted wait_mounted wait_unmounted lock_free wait_lock_free
@@ -101,9 +109,59 @@ check "source dir survived too" test -d "$MNT/rd1"
 check "rename dir over empty dir"  mv -T "$MNT/rd1" "$MNT/rd3"
 expect_fail "old dir name gone" test -e "$MNT/rd1"
 check "renamed dir usable" bash -c "echo g > '$MNT/rd3/g' && rm -r '$MNT/rd3' '$MNT/rd2'"
-# The kernel caches attributes for one second (fs.rs TTL); the mode change
-# from the write is visible after that, so the check waits it out.
-check "setuid bit is dropped by a write" bash -c "echo s > '$MNT/suid' && chmod 4755 '$MNT/suid' && [ \"\$(stat -c %a '$MNT/suid')\" = 4755 ] && echo more >> '$MNT/suid' && sleep 1.5 && [ \"\$(stat -c %a '$MNT/suid')\" = 755 ]"
+# renameat2(2) flags: `mv -n` asks for RENAME_NOREPLACE and must not
+# overwrite; the exchange and whiteout flags are not implemented and have to
+# say so rather than destroying the target.
+check "files for the rename flags" bash -c "echo one > '$MNT/rf1' && echo two > '$MNT/rf2'"
+check "mv -n refuses to overwrite" bash -c "mv -n '$MNT/rf1' '$MNT/rf2' 2>/dev/null; [ \"\$(cat '$MNT/rf2')\" = two ]"
+check "and left the source alone"  test -e "$MNT/rf1"
+check "renameat2 flag behaviour (python)" python3 - "$MNT" <<'PY'
+import ctypes, ctypes.util, errno, os, sys
+mnt = sys.argv[1]
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+AT_FDCWD, RENAME_NOREPLACE, RENAME_EXCHANGE = -100, 1, 2
+
+def rename2(a, b, flags):
+    r = libc.renameat2(AT_FDCWD, a.encode(), AT_FDCWD, b.encode(), flags)
+    return 0 if r == 0 else ctypes.get_errno()
+
+a, b = f"{mnt}/rf1", f"{mnt}/rf2"
+e = rename2(a, b, RENAME_NOREPLACE)
+assert e == errno.EEXIST, f"NOREPLACE over an existing file: expected EEXIST, got {e}"
+assert open(b).read() == "two\n" and os.path.exists(a), "NOREPLACE must change nothing"
+e = rename2(a, b, RENAME_EXCHANGE)
+assert e in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP), f"EXCHANGE: expected a refusal, got {e}"
+assert open(b).read() == "two\n" and open(a).read() == "one\n", "a refused EXCHANGE must change nothing"
+assert rename2(a, f"{mnt}/rf3", RENAME_NOREPLACE) == 0, "NOREPLACE onto a free name must work"
+assert open(f"{mnt}/rf3").read() == "one\n"
+PY
+check "clean up rename flag files" bash -c "rm -f '$MNT/rf1' '$MNT/rf2' '$MNT/rf3'"
+# Dropping setuid/setgid and file capabilities on write, truncate and chown
+# is coffer's own job since it negotiates FUSE_HANDLE_KILLPRIV_V2 (fs.rs
+# init()). The kernel only asks for it when the caller lacks CAP_FSETID, so
+# as root the correct answer is to keep the bits - the checks would be
+# testing the opposite thing and are skipped there.
+if [ "$(id -u)" != 0 ]; then
+    check "setuid survives until something writes" bash -c "echo s > '$MNT/suid' && chmod 4755 '$MNT/suid' && [ \"\$(stat -c %a '$MNT/suid')\" = 4755 ]"
+    check "a write drops setuid"        bash -c "echo more >> '$MNT/suid' && wait_mode '$MNT/suid' 755"
+    check "a truncate drops setuid"     bash -c "chmod 4755 '$MNT/suid' && truncate -s 2 '$MNT/suid' && wait_mode '$MNT/suid' 755"
+    check "setgid+group-x is dropped too" bash -c "chmod 2755 '$MNT/suid' && echo x >> '$MNT/suid' && wait_mode '$MNT/suid' 755"
+    # S_ISGID without group-execute is not a privilege but a mandatory-
+    # locking marker, and Linux leaves it alone; so must coffer.
+    check "setgid without group-x survives a write" bash -c "chmod 2644 '$MNT/suid' && echo x >> '$MNT/suid' && sleep 1.5 && [ \"\$(stat -c %a '$MNT/suid')\" = 2644 ]"
+    check "an explicit chmod u+s is not undone by its own request" bash -c "chmod 4755 '$MNT/suid' && sleep 1.5 && [ \"\$(stat -c %a '$MNT/suid')\" = 4755 ]"
+    # kill_priv() also removes the security.capability attribute, which
+    # cannot be checked from here: setting it needs CAP_SETFCAP, so an
+    # unprivileged process is refused by the kernel before the request ever
+    # reaches the filesystem (on ext4 just the same), and a privileged one
+    # would not have the kernel ask for the kill in the first place. The
+    # path matters for a file capability brought in by a root-run
+    # `rsync -X`, which a later unprivileged write must drop.
+    check "chown drops setuid as well" bash -c "chmod 4755 '$MNT/suid' && chown \"\$(id -u)\" '$MNT/suid' && wait_mode '$MNT/suid' 755"
+    check "clean up" rm "$MNT/suid"
+else
+    echo "  skip setuid/capability checks (running as root, the kernel would not ask for them)"
+fi
 check "symlink"            ln -s a/bb/c/g.txt "$MNT/link"
 eq "readlink" "a/bb/c/g.txt" "$(readlink "$MNT/link")"
 eq "read through symlink" "hello" "$(head -1 "$MNT/link")"
@@ -337,13 +395,23 @@ if [ -n "${COFFER_PREV:-}" ] && [ -x "$COFFER_PREV" ]; then
     check "previous version mounts it" bash -c "'$COFFER_PREV' mount '$OLDV' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
     eq "previous version reads our file" "new" "$(cat "$OLDM/from-new")"
     check "previous version writes"   bash -c "echo old > '$OLDM/from-old'"
-    check "previous version deletes the file with our xattr" rm "$OLDM/from-new"
     check "umount (previous version)" bash -c "'$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$OLDV'"
     check "this version mounts it again" mnt "$OLDV" "$OLDM"
-    expect_fail "the deleted file stays deleted" test -e "$OLDM/from-new"
-    check "re-create the same name: no stale xattr" bash -c "echo again > '$OLDM/from-new'"
-    expect_fail "no xattr resurfaces on the new file" getfattr -n user.k "$OLDM/from-new"
+    eq "our xattr survived the round trip" "v" "$(getfattr -n user.k --only-values "$OLDM/from-new" 2>/dev/null)"
     eq "previous version's file is there" "old" "$(cat "$OLDM/from-old")"
+    check "umount"                    umnt "$OLDV" "$OLDM"
+    # The previous version knows nothing about the xattrs table, so its
+    # unlink is a plain DELETE FROM inodes - the xattrs_gc trigger in the
+    # schema is what still takes the attribute rows with it. That the rows
+    # are really gone is asserted directly against the database by
+    # db::tests::deleting_an_inode_row_drops_its_xattrs; here we only check
+    # that the delete works and the container stays sound.
+    check "previous version deletes the file with our xattr" bash -c "'$COFFER_PREV' mount '$OLDV' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM' && rm '$OLDM/from-new' && '$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$OLDV'"
+    check "container still sound afterwards" "$COFFER_PREV" check "$OLDV" --password-file "$PW"
+    check "this version mounts it once more" mnt "$OLDV" "$OLDM"
+    expect_fail "the deleted file stays deleted" test -e "$OLDM/from-new"
+    check "re-create the same name"   bash -c "echo again > '$OLDM/from-new'"
+    expect_fail "no attribute resurfaces on it" getfattr -n user.k "$OLDM/from-new"
     check "umount"                    umnt "$OLDV" "$OLDM"
     check "previous version mounts this version's container" bash -c "'$COFFER_PREV' mount '$V' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
     eq "previous version reads it" "250" "$(cat "$OLDM/many/f250")"
@@ -362,7 +430,17 @@ except OSError as e:
 PY
     check "umount"                    umnt "$WORK/old2.coffer" "$OLDM"
 else
-    echo; echo "== compatibility: skipped (set COFFER_PREV to a previous release's binary)"
+    echo
+    echo "== compatibility: NOT RUN (no COFFER_PREV)"
+    if [ -n "${COFFER_PREV_OPTIONAL:-}" ]; then
+        echo "  allowed by COFFER_PREV_OPTIONAL"
+    else
+        # A skipped cross-version section must not look like a green run:
+        # it is the only proof that containers keep opening in both
+        # directions. Set COFFER_PREV_OPTIONAL=1 where there is no previous
+        # release to test against (a fork, a first release).
+        bad "cross-version section skipped (set COFFER_PREV, or COFFER_PREV_OPTIONAL=1 to allow)"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
