@@ -10,6 +10,12 @@ description = "Growable, user-mountable encrypted single-file containers (SQLCip
 license = "MIT"
 authors = ["Robert Tulke <rt@debian.sh>"]
 repository = "https://github.com/rtulke/cofferFS"
+# crates.io only accepts slugs from its own fixed list
+# (https://crates.io/category_slugs), at most five, and rejects the
+# publish outright on a typo. Keywords are free-form: five at most, 20
+# characters each.
+categories = ["filesystem", "cryptography", "command-line-utilities"]
+keywords = ["fuse", "encryption", "sqlcipher", "container", "vault"]
 # Repository decoration nobody building from crates.io needs: the demo
 # animation and the social-preview card are a quarter of a megabyte of
 # images, and the CI workflows only mean anything inside the repository.
