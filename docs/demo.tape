@@ -16,7 +16,7 @@ Set Width 1300
 Set Height 580
 Set Padding 18
 Set Margin 20
-Set MarginFill "#674EFF"
+Set MarginFill "#2A2833"
 Set BorderRadius 10
 Set WindowBar Colorful
 Set Theme "Catppuccin Mocha"
