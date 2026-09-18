@@ -546,6 +546,15 @@ SQLCipher build happens to be in a given distro's archive at the time.
 All packages pass the full `test-install.sh` cycle (install, create, mount,
 write, read, unmount, check) on every target and both architectures.
 
+**crates.io.** The crate is published as
+[`cofferfs`](https://crates.io/crates/cofferfs) - `coffer` was already
+taken there by an unrelated library. Only the crate name differs: `[[bin]]`
+in `Cargo.toml` keeps the binary called `coffer`, and a `name` key in the
+cargo-deb and cargo-generate-rpm metadata keeps the `.deb` and `.rpm`
+called `coffer` too, so nothing a user sees changes. The demo animation,
+the social-preview image and the CI workflows are excluded from the
+crate; what remains is 88 KB.
+
 **Signatures.** The release job writes `SHA256SUMS` over every package and
 signs that file with [minisign](https://jedisct1.github.io/minisign/)
 (`SHA256SUMS.minisig`). A checksum file alone proves nothing - whoever can

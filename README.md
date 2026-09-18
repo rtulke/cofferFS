@@ -75,6 +75,18 @@ minisign -Vm SHA256SUMS -P RWQ+t65ZtqJCgWr+lzpOt84AQwlTWWeXkovMWjdwJM2+EFvmCrJwz
 sha256sum -c SHA256SUMS --ignore-missing      # checks the package(s) you downloaded
 ```
 
+### Cargo
+
+```bash
+cargo install cofferfs      # the crate is cofferfs, the binary is coffer
+```
+
+The crate name differs because `coffer` was taken on crates.io by an
+unrelated library; what gets installed is still `coffer`. Needs a Rust
+toolchain and the `fuse3` package for the `fusermount3` helper, and
+compiles SQLCipher and OpenSSL from source, so the first build takes a
+while. The prebuilt packages above are quicker.
+
 ### From source
 
 ```bash
