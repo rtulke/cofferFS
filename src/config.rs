@@ -13,6 +13,7 @@
 //! password_command = pass show coffer/work   # optional, same as --password-command
 //! log_file = ~/.coffer/work.log      # optional, same as --log
 //! read_only = true                    # optional, same as --read-only
+//! enforce_permissions = true           # optional, same as --enforce-permissions
 //! ```
 //!
 //! Parsed by hand rather than through a TOML/serde dependency: the format
@@ -40,6 +41,7 @@ pub struct Vault {
     pub password_command: Option<String>,
     pub log_file: Option<PathBuf>,
     pub read_only: bool,
+    pub enforce_permissions: bool,
 }
 
 struct Section {
@@ -121,6 +123,15 @@ fn unquote(v: &str) -> &str {
     }
 }
 
+/// The spellings a hand-edited registry may reasonably use for a flag.
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 fn is_comment(line: &str) -> bool {
     let t = line.trim_start();
     t.is_empty() || t.starts_with('#') || t.starts_with(';')
@@ -183,6 +194,7 @@ impl Config {
             (None, None, None, None, None, None);
         let mut password_command = None;
         let mut read_only = false;
+        let mut enforce_permissions = false;
         for raw in &section.lines {
             if is_comment(raw) {
                 continue;
@@ -202,15 +214,14 @@ impl Config {
                 "password_file" => password_file = Some(expand_tilde(value)),
                 "password_command" => password_command = Some(value.to_string()),
                 "log_file" => log_file = Some(expand_tilde(value)),
-                "read_only" => {
-                    read_only = match value.to_ascii_lowercase().as_str() {
-                        "true" | "yes" | "on" | "1" => true,
-                        "false" | "no" | "off" | "0" => false,
-                        _ => bail!(where_(&format!("`read_only` must be true or false, got {value:?}"))),
-                    }
+                "read_only" => read_only = parse_bool(value).ok_or_else(|| anyhow!(where_(&format!("`read_only` must be true or false, got {value:?}"))))?,
+                "enforce_permissions" => {
+                    enforce_permissions = parse_bool(value).ok_or_else(|| {
+                        anyhow!(where_(&format!("`enforce_permissions` must be true or false, got {value:?}")))
+                    })?
                 }
                 other => bail!(where_(&format!(
-                    "unknown key {other:?} (expected file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file or read_only)"
+                    "unknown key {other:?} (expected file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only or enforce_permissions)"
                 ))),
             }
         }
@@ -224,6 +235,7 @@ impl Config {
             password_command,
             log_file,
             read_only,
+            enforce_permissions,
         })
     }
 
@@ -335,6 +347,9 @@ fn render(vault: &Vault) -> Vec<String> {
     if vault.read_only {
         lines.push("read_only = true".to_string());
     }
+    if vault.enforce_permissions {
+        lines.push("enforce_permissions = true".to_string());
+    }
     lines
 }
 
@@ -357,6 +372,7 @@ mod tests {
             password_command: None,
             log_file: None,
             read_only: false,
+            enforce_permissions: false,
         }
     }
 
@@ -388,6 +404,8 @@ mod tests {
         assert!(cfg("[a]\nfile=\nmountpoint=/m\n").vaults().is_err(), "empty value");
         assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nread_only=maybe\n").vaults().is_err(), "bad read_only");
         assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nread_only=yes\n").vaults().unwrap()[0].read_only);
+        assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nenforce_permissions=on\n").vaults().unwrap()[0].enforce_permissions);
+        assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nenforce_permissions=sometimes\n").vaults().is_err(), "bad enforce_permissions");
         for bad in ["", "-x", ".x", "a b", "a/b", "a[b]"] {
             assert!(validate_alias(bad).is_err(), "{bad:?} should be rejected");
         }
@@ -426,10 +444,11 @@ mod tests {
         v.password_command = Some("pass show x = y".into());
         v.log_file = Some("/log".into());
         v.read_only = true;
+        v.enforce_permissions = true;
         c.upsert(&v);
         let text = c.to_text();
         assert!(text.starts_with("# coffer vault registry"));
-        assert!(text.ends_with("\n[work]\nfile = /data/work.coffer\nmountpoint = /mnt/work\nidle_timeout = 30m\ncompact_on_idle = 2h\npassword_file = /pw\npassword_command = pass show x = y\nlog_file = /log\nread_only = true\n"));
+        assert!(text.ends_with("\n[work]\nfile = /data/work.coffer\nmountpoint = /mnt/work\nidle_timeout = 30m\ncompact_on_idle = 2h\npassword_file = /pw\npassword_command = pass show x = y\nlog_file = /log\nread_only = true\nenforce_permissions = true\n"));
         assert_eq!(cfg(&text).vaults().unwrap(), vec![v]);
     }
 

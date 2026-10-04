@@ -116,6 +116,40 @@ request always wins over the drop. For writes the kernel says when;
 the rule itself. Older kernels refuse the capability and keep the round
 trip.
 
+### Permission enforcement
+
+The mode, owner and group of everything inside a container are stored and
+reported faithfully, so `ls -l` and tools that inspect permissions (ssh
+refusing a world-readable key, say) behave normally. What does *not*
+happen by default is the check: a file with mode `000` still opens,
+because nothing between the caller and the data applies the Unix rules.
+
+`coffer mount --enforce-permissions` (registry key
+`enforce_permissions`, also settable at `create --save` and `add` time)
+adds FUSE's `default_permissions` mount option. The kernel then applies
+the ordinary rules to exactly what coffer reports - sticky bits and
+supplementary groups included, which is why this belongs in the kernel
+rather than in a hand-written `access()`.
+
+It is off by default on purpose, and the reason is not performance:
+
+- **Foreign owners.** Files put into a container by a root-run `rsync -a`
+  from a system backup belong to uid 0, 33 and so on. Without enforcement
+  you read them; with it you cannot, and `chown`-ing them back needs
+  privileges you do not have inside the container either.
+- **A different user id.** The root inode carries the uid of whoever ran
+  `create`, with mode `0700`. Mount the same container on a second machine
+  where you are uid 501 instead of 1000 - or off a USB stick - and
+  enforcement refuses the root directory itself.
+
+Neither case is a bug; both are what Unix permissions mean. They are just
+not what someone moving a personal container between machines expects, so
+the setting is opt-in. It changes nothing about secrecy: the container is
+a single-user thing, anyone with the password can mount it under their own
+id, and root is exempt from the check anyway. To get past a stored
+setting, mount by path rather than by alias - that path never reads the
+registry.
+
 ### renameat2 flags
 
 `rename(2)` replaces an existing target, but `renameat2(2)` lets the
@@ -447,7 +481,8 @@ copy.
   bullet in **Design notes** - rather than silently racing two writers.
 - **No `default_permissions` enforcement.** Whoever can supply the
   password gets full read/write access to everything inside; Unix
-  permission bits are stored and reported but not enforced. This matches
+  permission bits are stored and reported but, unless
+  `--enforce-permissions` is given, not enforced. This matches
   the personal-container use case (VeraCrypt-style), not a multi-user
   shared filesystem.
 - **Large files are fine, but not optimized for huge ones.** Reads/writes

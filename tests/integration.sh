@@ -255,6 +255,35 @@ check "--ro alias"         mnt "$V" "$MNT" --ro
 check "umount"             umnt "$V" "$MNT"
 
 # ---------------------------------------------------------------------------
+section "permission enforcement"
+# Without --enforce-permissions the stored mode is reported but never
+# checked; with it the kernel applies the ordinary rules. Root bypasses
+# those checks, so as root the checks would prove nothing.
+check "mount (default: not enforced)" mnt "$V" "$MNT"
+check "a file with mode 000"  bash -c "echo secret > '$MNT/noperm' && chmod 000 '$MNT/noperm'"
+eq "readable anyway" "secret" "$(cat "$MNT/noperm" 2>/dev/null)"
+check "umount"                umnt "$V" "$MNT"
+check "mount --enforce-permissions" mnt "$V" "$MNT" --enforce-permissions
+if [ "$(id -u)" != 0 ]; then
+    expect_fail "mode 000 is refused now"      cat "$MNT/noperm"
+    check "chmod 644 makes it readable again"  bash -c "chmod 644 '$MNT/noperm' && [ \"\$(cat '$MNT/noperm')\" = secret ]"
+    check "a directory with mode 000"          bash -c "mkdir -p '$MNT/nodir' && echo x > '$MNT/nodir/f' && chmod 000 '$MNT/nodir'"
+    expect_fail "entering it is refused"       ls "$MNT/nodir"
+    check "chmod 755 opens it again"           bash -c "chmod 755 '$MNT/nodir' && ls '$MNT/nodir' >/dev/null"
+else
+    echo "  skip the refusal checks (running as root, which bypasses permission checks)"
+fi
+check "umount"                umnt "$V" "$MNT"
+check "create --save stores it"  bash -c "'$COFFER' create '$WORK/ep.coffer' --save ep --mountpoint '$WORK/mnt2' --enforce-permissions --password-file '$PW' >/dev/null && grep -q '^enforce_permissions = true' '$COFFER_CONFIG'"
+check "add --enforce-permissions too" bash -c "'$COFFER' add ep2 '$V' '$WORK/mnt2' --enforce-permissions --password-file '$PW' >/dev/null && grep -c '^enforce_permissions = true' '$COFFER_CONFIG' | grep -qx 2"
+check "mounting the alias enforces" bash -c "'$COFFER' mount ep --password-file '$PW' >/dev/null && wait_mounted '$WORK/mnt2'"
+if [ "$(id -u)" != 0 ]; then
+    expect_fail "and a mode 000 file stays refused there" bash -c "echo s > '$WORK/mnt2/x' && chmod 000 '$WORK/mnt2/x' && cat '$WORK/mnt2/x'"
+fi
+check "umount the alias"      bash -c "'$COFFER' umount ep >/dev/null && wait_unmounted '$WORK/mnt2' && wait_lock_free '$WORK/ep.coffer'"
+check "remove the test aliases" bash -c "'$COFFER' remove ep >/dev/null && '$COFFER' remove ep2 >/dev/null"
+
+# ---------------------------------------------------------------------------
 section "idle timeout"
 check "mount --idle-timeout 2s" mnt "$V" "$MNT" --idle-timeout 2s
 check "auto-unmounted within 40 s" wait_unmounted "$MNT" 200

@@ -35,6 +35,7 @@ coffer \- growable, user-mountable encrypted single-file containers
 .RB [ \-\-read\-only ]
 .RB [ \-\-log
 .IR FILE ]
+.RB [ \-\-enforce\-permissions ]
 .br
 .B coffer umount
 .RI [ mountpoint | alias ]
@@ -52,6 +53,7 @@ coffer \- growable, user-mountable encrypted single-file containers
 .RB [ \-\-log\-file
 .IR FILE ]
 .RB [ \-\-read\-only ]
+.RB [ \-\-enforce\-permissions ]
 .br
 .B coffer remove
 .I alias
@@ -228,7 +230,7 @@ would, so
 .I ALIAS
 works from then on.
 .TP
-.BI "mount [" file | alias " [" mountpoint "]] [\-\-save " ALIAS "] [\-\-foreground] [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-read\-only] [\-\-log " FILE ]
+.BI "mount [" file | alias " [" mountpoint "]] [\-\-save " ALIAS "] [\-\-foreground] [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-read\-only] [\-\-log " FILE "] [\-\-enforce\-permissions]
 Mount
 .I file
 at
@@ -323,6 +325,29 @@ The file is created with mode 0600. Stored with
 or
 .BR add ,
 it becomes the alias's default.
+.B \-\-enforce\-permissions
+hands the permission bits to the kernel to check
+.RB ( default_permissions )
+instead of only reporting them. Off by default, and deliberately so: the
+mode, owner and group stored in a container are written and reported
+faithfully, but nothing checks them, so a file with mode
+.B 000
+still opens. Turning the check on makes
+.BR chmod " and " chown
+inside the container mean what they say \- and can also lock you out of
+your own data, which is why it is not the default: files restored from a
+system backup carry foreign owners and become unreadable, and a container
+created under one user id refuses its own root directory when mounted
+under another (a second machine, a USB stick). It adds no secrecy either
+way \- whoever knows the password can mount the container themselves, and
+root is not subject to the check at all. Stored with
+.BR add ,
+with
+.B create \-\-save
+or alongside
+.BR \-\-save ,
+it applies to every mount of that alias; to get past a stored setting,
+mount by path instead of by alias, which never reads the registry.
 .TP
 .BI "umount [" mountpoint | alias ]
 Unmount a container previously mounted at
@@ -348,7 +373,7 @@ the mount daemon exits and releases the container's lock right away instead
 of lingering until the last holder lets go; anything that still had files
 open there gets I/O errors from then on.
 .TP
-.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE "] [\-\-password\-command " CMD "] [\-\-log\-file " FILE "] [\-\-read\-only]
+.BI "add " alias " " file " " mountpoint " [\-\-idle\-timeout " DURATION "] [\-\-compact\-on\-idle " DURATION "] [\-\-password\-file " FILE "] [\-\-password\-command " CMD "] [\-\-log\-file " FILE "] [\-\-read\-only] [\-\-enforce\-permissions]
 Register
 .I file
 (which must already exist) and
@@ -455,7 +480,7 @@ The per-user vault registry: one
 section per registered vault, with
 .BR file " and " mountpoint
 lines and optionally
-.BR idle_timeout ", " compact_on_idle ", " password_file ", " password_command ", " log_file " and " read_only
+.BR idle_timeout ", " compact_on_idle ", " password_file ", " password_command ", " log_file ", " read_only " and " enforce_permissions
 (same formats as the corresponding flags;
 .B read_only
 takes true or false). Written atomically with mode

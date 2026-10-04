@@ -44,6 +44,10 @@ enum Cmd {
         /// Mountpoint to register along with --save
         #[arg(long, value_name = "DIR", requires = "save")]
         mountpoint: Option<PathBuf>,
+        /// Store "let the kernel enforce the permission bits" with --save,
+        /// so every `coffer mount ALIAS` mounts with it (see mount --enforce-permissions)
+        #[arg(long, requires = "save")]
+        enforce_permissions: bool,
     },
     /// Mount a container as the current user
     Mount {
@@ -82,6 +86,10 @@ enum Cmd {
         /// print them
         #[arg(short = 'l', long, value_name = "FILE")]
         log: Option<PathBuf>,
+        /// Let the kernel enforce the permission bits stored in the container
+        /// instead of only reporting them (FUSE default_permissions)
+        #[arg(long)]
+        enforce_permissions: bool,
     },
     /// Unmount a container
     Umount {
@@ -115,6 +123,9 @@ enum Cmd {
         /// Always mount this vault read-only (same as --read-only on every mount)
         #[arg(long)]
         read_only: bool,
+        /// Always enforce the permission bits for this vault
+        #[arg(long)]
+        enforce_permissions: bool,
     },
     /// Forget a registered alias (the container file itself is left untouched)
     Remove { alias: String },
@@ -361,6 +372,7 @@ struct MountOpts {
     password_command: Option<String>,
     read_only: bool,
     log: Option<PathBuf>,
+    enforce_permissions: bool,
 }
 
 impl MountOpts {
@@ -375,9 +387,13 @@ impl MountOpts {
             self.password_command = vault.password_command.clone();
         }
         self.log = self.log.or_else(|| vault.log_file.clone());
-        // A stored read_only can only add restriction; there's no flag to
-        // override it back to writable, which is the point of storing it.
+        // A stored read_only or enforce_permissions can only add
+        // restriction; there is no flag to override either back off, which
+        // is the point of storing them. The way out, if a stored setting
+        // locks you out of your own container, is to mount by path instead
+        // of by alias - that never reads the registry.
         self.read_only = self.read_only || vault.read_only;
+        self.enforce_permissions = self.enforce_permissions || vault.enforce_permissions;
         self
     }
 }
@@ -490,10 +506,11 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
     let max_size = db::read_max_size(&con);
 
     println!(
-        "coffer: mounting {} at {}{}",
+        "coffer: mounting {} at {}{}{}",
         file.display(),
         mountpoint.display(),
-        if opts.read_only { " (read-only)" } else { "" }
+        if opts.read_only { " (read-only)" } else { "" },
+        if opts.enforce_permissions { " (permissions enforced)" } else { "" }
     );
 
     let filesystem = fs::CofferFS::new(con, max_size, &abs_file, opts.read_only);
@@ -511,6 +528,21 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
         // Kernel-enforced: writes never even reach the FUSE loop. fs.rs
         // additionally refuses them itself, as a second line.
         config.mount_options.push(fuser::MountOption::RO);
+    }
+    if opts.enforce_permissions {
+        // Without this the mode/uid/gid stored in the container are only
+        // reported, never checked: a file with mode 000 still opens. With
+        // it the kernel applies the ordinary Unix rules to what coffer
+        // reports, exactly as it does for any other filesystem - including
+        // the sticky bit and supplementary groups, which is why this is the
+        // kernel's job and not something to reimplement in access().
+        //
+        // Off by default because it changes what an existing container can
+        // do: files restored from a backup carry foreign uids and would
+        // become unreadable, and a container created under one uid would
+        // refuse its own root directory when mounted under another (another
+        // machine, a stick). See REFERENCE.md.
+        config.mount_options.push(fuser::MountOption::DefaultPermissions);
     }
 
     // Session::new() performs the actual mount(2) and the FUSE handshake
@@ -1327,7 +1359,7 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Create { file, max_size, password_file, password_command, save, mountpoint } => {
+        Cmd::Create { file, max_size, password_file, password_command, save, mountpoint, enforce_permissions } => {
             // Alias and config are checked up front: a bad alias or an
             // unreadable config shouldn't surface only after the container
             // has already been created.
@@ -1341,12 +1373,23 @@ fn main() -> Result<()> {
             cmd_create(&file, max_size, password_file.as_deref(), password_command.as_deref())?;
             if let (Some(alias), Some(cfg)) = (save, cfg.as_mut()) {
                 let mountpoint = mountpoint.expect("clap: --save requires --mountpoint");
-                cmd_add(cfg, Vault { alias, file, mountpoint, idle_timeout: None, compact_on_idle: None, password_file: None, password_command: None, log_file: None, read_only: false })?;
+                cmd_add(cfg, Vault {
+                    alias,
+                    file,
+                    mountpoint,
+                    idle_timeout: None,
+                    compact_on_idle: None,
+                    password_file: None,
+                    password_command: None,
+                    log_file: None,
+                    read_only: false,
+                    enforce_permissions,
+                })?;
             }
             Ok(())
         }
-        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log } => {
-            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log };
+        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log, enforce_permissions } => {
+            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log, enforce_permissions };
             let (file, mountpoint, opts) = plan_mount(target.as_deref(), mountpoint, opts)?;
             if let Some(alias) = save {
                 let vault = Vault {
@@ -1359,14 +1402,15 @@ fn main() -> Result<()> {
                     password_command: opts.password_command.clone(),
                     log_file: opts.log.clone(),
                     read_only: opts.read_only,
+                    enforce_permissions: opts.enforce_permissions,
                 };
                 cmd_add(&mut Config::load()?, vault)?;
             }
             cmd_mount(&file, &mountpoint, opts)
         }
         Cmd::Umount { target } => cmd_umount(target.as_deref()),
-        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only } => {
-            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only };
+        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only, enforce_permissions } => {
+            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only, enforce_permissions };
             cmd_add(&mut Config::load()?, vault)
         }
         Cmd::Remove { alias } => cmd_remove(&mut Config::load()?, &alias),

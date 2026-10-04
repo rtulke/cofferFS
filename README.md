@@ -259,9 +259,9 @@ there is something meaningful to reclaim.
 | Command | What it does | Notable options |
 |---|---|---|
 | `create FILE` | Create a new container (password prompted twice) | `--max-size 10G`, `--save ALIAS --mountpoint DIR`, `--password-file`, `--password-command` |
-| `mount [FILE\|ALIAS] [DIR]` | Mount as the current user; no argument = registered vault or menu | `--save ALIAS`, `--idle-timeout`, `--compact-on-idle`, `--foreground`, `--password-file`, `--password-command`, `--read-only` (`-r`), `--log FILE` (`-l`) |
+| `mount [FILE\|ALIAS] [DIR]` | Mount as the current user; no argument = registered vault or menu | `--save ALIAS`, `--idle-timeout`, `--compact-on-idle`, `--foreground`, `--password-file`, `--password-command`, `--read-only` (`-r`), `--log FILE` (`-l`), `--enforce-permissions` |
 | `umount [DIR\|ALIAS]` | Unmount; no argument = the mounted registered vault or menu | |
-| `add ALIAS FILE DIR` | Register a vault in `~/.coffer/config` | `--idle-timeout`, `--compact-on-idle`, `--password-file`, `--password-command`, `--log-file`, `--read-only` |
+| `add ALIAS FILE DIR` | Register a vault in `~/.coffer/config` | `--idle-timeout`, `--compact-on-idle`, `--password-file`, `--password-command`, `--log-file`, `--read-only`, `--enforce-permissions` |
 | `remove ALIAS` | Forget an alias (the file stays) | |
 | `list` | Registered vaults and whether each is mounted | |
 | `info FILE\|ALIAS` | Counts and sizes | `--password-file`, `--password-command` |
@@ -288,10 +288,15 @@ full.
   ownership, timestamps and extended attributes (`user.*` and the rest,
   up to 64 KiB per value like ext4), so `cp -a`, `rsync -aX` and desktop
   tagging round-trip. Not hard links, yet.
-- **Limitations.** One mounter at a time. Unix permission bits inside the
-  container are stored but not enforced - whoever has the password has
-  everything. Fine for documents and photos, not tuned for routinely
-  storing many multi-GB files.
+- **Permission bits.** Stored and reported faithfully, but not checked by
+  default: a file with mode `000` still opens. `--enforce-permissions`
+  hands the check to the kernel, which makes `chmod` inside the container
+  mean what it says. It is off by default because it can lock you out of
+  files restored from a backup (foreign owners) or of a container created
+  under a different user id. It adds no secrecy: whoever has the password
+  can mount the container themselves.
+- **Limitations.** One mounter at a time. Fine for documents and photos,
+  not tuned for routinely storing many multi-GB files.
 - **Known upstream bug.** SQLCipher's `cipher_integrity_check` misreports
   pages past 4 GB in the version currently bundled; `coffer check` detects
   and works around that pattern. Details in REFERENCE.md.
