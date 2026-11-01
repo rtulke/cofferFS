@@ -9,7 +9,7 @@
 # changes and on every release tag.
 
 pkgname=coffer
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)"
 arch=('x86_64' 'aarch64')
@@ -27,9 +27,9 @@ makedepends=('rust' 'perl')
 # !debug: the release profile strips the binary, so the debug split package
 # would be empty.
 options=('!lto' '!debug')
-_commit=bf075ac88ef9fb812b64355dded22305fa4d7dd0
+_commit=4fcd38377da51d667500c1d3545b55c04057ef83
 source=("cofferFS-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('a3fc355aed1d4f15335aae6393003dbe9e70a35c40847fd3a132de5a1a252f57')
+sha256sums=('66c55198c5f056d2614c71d66bda08e59140fa4b131af02ae320bb051489a5b4')
 
 prepare() {
     cd "cofferFS-$pkgver"
