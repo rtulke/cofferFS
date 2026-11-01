@@ -481,7 +481,8 @@ using SQLite's online backup API. Safe to run while
 is mounted and being actively written to; if the mount holds its locks
 exclusively (see
 .BR \-\-locking ),
-the running mount writes the copy itself.
+the running mount writes the copy itself \- which works only on the
+machine where it is mounted.
 .TP
 .BI "passwd " file | alias
 Change the container password. Prompts for the current password, then

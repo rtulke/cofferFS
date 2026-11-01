@@ -345,10 +345,13 @@ while it's mounted. `coffer backup` then goes through the mount daemon,
 which listens on a socket in `/run/user/UID/coffer/` (or
 `/tmp/coffer-UID/`) that only its owner can reach, checks the password
 against the container, and copies 4 MiB at a time so the mount keeps
-working during the backup. `coffer check` and `coffer info` say the
-container is mounted and ask for an unmount. Read-only mounts always use
-normal locking (an exclusive WAL connection needs a write lock, which a
-read-only file descriptor can't take).
+working during the backup. That socket is local, so the backup has to run
+on the machine where the container is mounted; from any other host it is
+refused like every other open (a backup across hosts was never safe
+anyway - SQLite's WAL doesn't work across machines). `coffer check` and
+`coffer info` say the container is mounted and ask for an unmount.
+Read-only mounts always use normal locking (an exclusive WAL connection
+needs a write lock, which a read-only file descriptor can't take).
 
 Two details the implementation has to get right, both because `fcntl()`
 locks belong to a process, not a file descriptor: the exclusive connection
@@ -581,6 +584,10 @@ copy.
   Mounting (or running `passwd`/`compact` against) an already-in-use
   container is rejected outright with a clear error - see the locking
   bullet in **Design notes** - rather than silently racing two writers.
+- **Exclusive locking keeps everything else out.** While a mount holds
+  its locks (`--locking`, the default on network filesystems), `check`
+  and `info` need an unmount, and `backup` works only on the machine the
+  container is mounted on - see **Locking on network filesystems**.
 - **No `default_permissions` enforcement.** Whoever can supply the
   password gets full read/write access to everything inside; Unix
   permission bits are stored and reported but, unless

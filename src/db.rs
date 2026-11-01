@@ -420,7 +420,7 @@ fn open_db_with(path: &Path, password: &str, readonly: bool, exclusive: bool) ->
         Ok(v) => v,
         Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => bail!(
             "{} is mounted - the mount holds it exclusively. Unmount it first, or for a copy \
-use `coffer backup`, which works through the running mount.",
+run `coffer backup` on the machine where it is mounted, which goes through the running mount.",
             path.display()
         ),
         Err(_) => bail!("wrong password, or the file is not a coffer container"),

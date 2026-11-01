@@ -227,7 +227,8 @@ Each user has their own registry, containers and mounts. A FUSE mount is
 visible only to the user who created it, so a container mounted by one
 user is invisible to everybody else - there is no shared-mount mode.
 Sharing a container means handing over a copy: `coffer backup` produces a
-consistent one at any time, even while the source is mounted.
+consistent one at any time, even while the source is mounted (on a
+network filesystem: from the machine it is mounted on).
 
 A container can be mounted by exactly one process at a time; `mount`,
 `passwd` and `compact` take an exclusive lock on the file and refuse to run
@@ -242,8 +243,9 @@ On a network filesystem (NFS, SMB, sshfs, ...) the mount holds its locks
 for its whole lifetime instead of per operation (`--locking`, default
 `auto`): per-operation locking costs a round trip to the server each time,
 which made a mount on NFS some 50x slower once the server recalled the
-file's delegation. While such a mount runs, `coffer backup` goes through it
-and `check`/`info` ask for an unmount. See **Locking on network
+file's delegation. While such a mount runs, `coffer backup` goes through it -
+on the machine where it is mounted; from another host it is refused - and
+`check`/`info` ask for an unmount. See **Locking on network
 filesystems** in REFERENCE.md.
 
 ### Maintenance
