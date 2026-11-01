@@ -52,8 +52,10 @@ This was the main ask, so it's worth spelling out:
    failing on real corruption anywhere in the file.
 3. **Live, consistent backups.** `coffer backup <file> <dest>` uses
    SQLite's online backup API to make a byte-consistent copy — safe to run
-   even while the container is mounted and being written to. Cheap
-   insurance; consider cronning it.
+   even while the container is mounted and being written to. (With
+   exclusive locking, the default on NFS, the running mount makes the copy
+   itself - see **Locking on network filesystems**.) Cheap insurance;
+   consider cronning it.
 4. **Wrong password fails loudly.** SQLCipher refuses to open the database
    at all if the passphrase is wrong (HMAC check on page 1 fails
    immediately) rather than silently returning garbage.
@@ -309,6 +311,52 @@ without `sudo`. Keep in mind `/tmp` is typically cleared on reboot, so if the
 container itself (not just the mountpoint) needs to survive a reboot, put it
 somewhere local but persistent instead.
 
+## Locking on network filesystems
+
+SQLite normally takes and releases its `fcntl()` locks around every
+transaction, and every FUSE call is at least one transaction. On a local
+disk that's a few syscalls. On NFS each lock and unlock is a round trip to
+the server, and the Linux client also drops its page cache for the file
+whenever it takes a lock - so the next read goes to the server as well.
+
+That cost stays hidden for a while: right after `mount`, the NFS server
+usually grants the open file a *delegation*, and while it holds one the
+client handles locks locally and keeps its cache. Once the server recalls
+the delegation (measured: hours into a mount, overnight, with nobody
+touching the file) every FUSE call costs four round trips, and the mount
+stays that slow until it's remounted and gets a fresh delegation. On the
+machine this was diagnosed on, `git status` in a small repository went from
+0.03 s to 1.3 s; `/proc/self/mountstats` showed ~270 LOCK, LOCKU, GETATTR
+and READ calls per `git status`.
+
+So on a network filesystem `coffer mount` holds its locks for the whole
+mount instead (`--locking`, registry key `locking`):
+
+- `auto` (default) - exclusive when the container is on NFS, SMB/CIFS,
+  Ceph, 9p, AFS, GFS2, OCFS2, Lustre or a FUSE filesystem such as sshfs;
+  normal everywhere else.
+- `exclusive` - always. SQLite's `locking_mode=EXCLUSIVE`, set before the
+  first access, so the WAL index lives in the daemon's memory rather than an
+  mmap()ed `-shm` file: no locking left per operation at all.
+- `normal` - SQLite's usual per-transaction locking, even on NFS.
+
+What changes with exclusive locking: nothing else can open the container
+while it's mounted. `coffer backup` then goes through the mount daemon,
+which listens on a socket in `/run/user/UID/coffer/` (or
+`/tmp/coffer-UID/`) that only its owner can reach, checks the password
+against the container, and copies 4 MiB at a time so the mount keeps
+working during the backup. `coffer check` and `coffer info` say the
+container is mounted and ask for an unmount. Read-only mounts always use
+normal locking (an exclusive WAL connection needs a write lock, which a
+read-only file descriptor can't take).
+
+Two details the implementation has to get right, both because `fcntl()`
+locks belong to a process, not a file descriptor: the exclusive connection
+is opened only after `mount` has daemonized (the parent's locks would not
+survive the fork), and the daemon never opens the container file a second
+time (closing *any* descriptor for a file drops *all* the process's locks
+on it - the password check reads page 1 through SQLite's own descriptor).
+
 ## Auto-unmount on idle
 
 `coffer mount --idle-timeout 30m` (accepts `s`/`m`/`h`/`d` suffixes, e.g.
@@ -429,7 +477,9 @@ of `--compact-on-idle`.
   against the same container at once - the actual risk this project cares
   about (two live writers). `check`, `backup`, and `info` deliberately don't
   lock: WAL mode already gives them a safe, consistent view alongside an
-  active writer, which `backup` in particular depends on. The lock is
+  active writer, which `backup` in particular depends on. (A mount with
+  exclusive locking - see **Locking on network filesystems** - keeps them
+  out instead; `backup` then goes through the mount.) The lock is
   released by the kernel the instant every fd on it closes - including on a
   crash or `kill -9` - so unlike a PID file there's no stale-lock case to
   clean up; verified by killing a mount mid-session and confirming `passwd`

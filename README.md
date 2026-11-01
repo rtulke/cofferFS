@@ -238,6 +238,14 @@ under `/tmp` and can keep it busy. If your home is on NFS with
 `root_squash`, see the NFS section in REFERENCE.md before choosing a
 location.
 
+On a network filesystem (NFS, SMB, sshfs, ...) the mount holds its locks
+for its whole lifetime instead of per operation (`--locking`, default
+`auto`): per-operation locking costs a round trip to the server each time,
+which made a mount on NFS some 50x slower once the server recalled the
+file's delegation. While such a mount runs, `coffer backup` goes through it
+and `check`/`info` ask for an unmount. See **Locking on network
+filesystems** in REFERENCE.md.
+
 ### Maintenance
 
 ```bash
@@ -259,9 +267,9 @@ there is something meaningful to reclaim.
 | Command | What it does | Notable options |
 |---|---|---|
 | `create FILE` | Create a new container (password prompted twice) | `--max-size 10G`, `--save ALIAS --mountpoint DIR`, `--password-file`, `--password-command` |
-| `mount [FILE\|ALIAS] [DIR]` | Mount as the current user; no argument = registered vault or menu | `--save ALIAS`, `--idle-timeout`, `--compact-on-idle`, `--foreground`, `--password-file`, `--password-command`, `--read-only` (`-r`), `--log FILE` (`-l`), `--enforce-permissions` |
+| `mount [FILE\|ALIAS] [DIR]` | Mount as the current user; no argument = registered vault or menu | `--save ALIAS`, `--idle-timeout`, `--compact-on-idle`, `--foreground`, `--password-file`, `--password-command`, `--read-only` (`-r`), `--log FILE` (`-l`), `--enforce-permissions`, `--locking auto\|exclusive\|normal` |
 | `umount [DIR\|ALIAS]` | Unmount; no argument = the mounted registered vault or menu | |
-| `add ALIAS FILE DIR` | Register a vault in `~/.coffer/config` | `--idle-timeout`, `--compact-on-idle`, `--password-file`, `--password-command`, `--log-file`, `--read-only`, `--enforce-permissions` |
+| `add ALIAS FILE DIR` | Register a vault in `~/.coffer/config` | `--idle-timeout`, `--compact-on-idle`, `--password-file`, `--password-command`, `--log-file`, `--read-only`, `--enforce-permissions`, `--locking` |
 | `remove ALIAS` | Forget an alias (the file stays) | |
 | `list` | Registered vaults and whether each is mounted | |
 | `info FILE\|ALIAS` | Counts and sizes | `--password-file`, `--password-command` |

@@ -36,6 +36,8 @@ coffer \- growable, user-mountable encrypted single-file containers
 .RB [ \-\-log
 .IR FILE ]
 .RB [ \-\-enforce\-permissions ]
+.RB [ \-\-locking
+.IR MODE ]
 .br
 .B coffer umount
 .RI [ mountpoint | alias ]
@@ -54,6 +56,8 @@ coffer \- growable, user-mountable encrypted single-file containers
 .IR FILE ]
 .RB [ \-\-read\-only ]
 .RB [ \-\-enforce\-permissions ]
+.RB [ \-\-locking
+.IR MODE ]
 .br
 .B coffer remove
 .I alias
@@ -227,7 +231,12 @@ writers.
 deliberately do not lock: WAL mode already gives them a safe, consistent
 view alongside an active writer, which
 .B backup
-in particular depends on. This lock is only as reliable as
+in particular depends on \- except while a mount holds its locks
+exclusively
+.RB ( \-\-locking ),
+when
+.B backup
+goes through the mount and the other two ask for an unmount. This lock is only as reliable as
 .BR flock (2)
 is on the underlying filesystem \- solid locally, but historically
 inconsistent over NFS \- so it should not be relied on as a hard guarantee
@@ -379,6 +388,22 @@ or alongside
 .BR \-\-save ,
 it applies to every mount of that alias; to get past a stored setting,
 mount by path instead of by alias, which never reads the registry.
+.IP
+.BI \-\-locking " MODE"
+How the mount locks the container file.
+.B auto
+(the default) holds SQLite's locks for the whole mount when the container
+is on a network filesystem (NFS, SMB/CIFS, Ceph, 9p, AFS, GFS2, OCFS2,
+Lustre, or FUSE such as sshfs) and locks per operation everywhere else;
+.BR exclusive " and " normal
+force one or the other. Per-operation locking on NFS costs a round trip to
+the server for every lock, which becomes noticeable once the server
+recalls the file's delegation \- typically hours into a mount. While a
+mount holds its locks,
+.B backup
+goes through the running mount and
+.BR check " and " info
+ask for an unmount. Read-only mounts always lock per operation.
 .TP
 .BI "umount [" mountpoint | alias ]
 Unmount a container previously mounted at
@@ -453,7 +478,10 @@ to
 .I dest
 using SQLite's online backup API. Safe to run while
 .I file
-is mounted and being actively written to.
+is mounted and being actively written to; if the mount holds its locks
+exclusively (see
+.BR \-\-locking ),
+the running mount writes the copy itself.
 .TP
 .BI "passwd " file | alias
 Change the container password. Prompts for the current password, then
@@ -513,7 +541,7 @@ The per-user vault registry: one
 section per registered vault, with
 .BR file " and " mountpoint
 lines and optionally
-.BR idle_timeout ", " compact_on_idle ", " password_file ", " password_command ", " log_file ", " read_only " and " enforce_permissions
+.BR idle_timeout ", " compact_on_idle ", " password_file ", " password_command ", " log_file ", " read_only ", " enforce_permissions " and " locking
 (same formats as the corresponding flags;
 .B read_only
 takes true or false). Written atomically with mode

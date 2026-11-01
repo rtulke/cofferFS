@@ -14,6 +14,7 @@
 //! log_file = ~/.coffer/work.log      # optional, same as --log
 //! read_only = true                    # optional, same as --read-only
 //! enforce_permissions = true           # optional, same as --enforce-permissions
+//! locking = exclusive                 # optional, same as --locking
 //! ```
 //!
 //! Parsed by hand rather than through a TOML/serde dependency: the format
@@ -21,6 +22,7 @@
 //! `coffer add` / `coffer remove` rewrite one section while leaving every
 //! other line - hand-written comments included - exactly as it was.
 
+use crate::db::Locking;
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -42,6 +44,7 @@ pub struct Vault {
     pub log_file: Option<PathBuf>,
     pub read_only: bool,
     pub enforce_permissions: bool,
+    pub locking: Option<Locking>,
 }
 
 struct Section {
@@ -195,6 +198,7 @@ impl Config {
         let mut password_command = None;
         let mut read_only = false;
         let mut enforce_permissions = false;
+        let mut locking = None;
         for raw in &section.lines {
             if is_comment(raw) {
                 continue;
@@ -220,8 +224,13 @@ impl Config {
                         anyhow!(where_(&format!("`enforce_permissions` must be true or false, got {value:?}")))
                     })?
                 }
+                "locking" => {
+                    locking = Some(Locking::parse(value).ok_or_else(|| {
+                        anyhow!(where_(&format!("`locking` must be auto, exclusive or normal, got {value:?}")))
+                    })?)
+                }
                 other => bail!(where_(&format!(
-                    "unknown key {other:?} (expected file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only or enforce_permissions)"
+                    "unknown key {other:?} (expected file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only, enforce_permissions or locking)"
                 ))),
             }
         }
@@ -236,6 +245,7 @@ impl Config {
             log_file,
             read_only,
             enforce_permissions,
+            locking,
         })
     }
 
@@ -350,6 +360,9 @@ fn render(vault: &Vault) -> Vec<String> {
     if vault.enforce_permissions {
         lines.push("enforce_permissions = true".to_string());
     }
+    if let Some(v) = vault.locking {
+        lines.push(format!("locking = {}", v.as_str()));
+    }
     lines
 }
 
@@ -373,6 +386,7 @@ mod tests {
             log_file: None,
             read_only: false,
             enforce_permissions: false,
+            locking: None,
         }
     }
 
@@ -406,6 +420,8 @@ mod tests {
         assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nread_only=yes\n").vaults().unwrap()[0].read_only);
         assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nenforce_permissions=on\n").vaults().unwrap()[0].enforce_permissions);
         assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nenforce_permissions=sometimes\n").vaults().is_err(), "bad enforce_permissions");
+        assert_eq!(cfg("[a]\nfile=/x\nmountpoint=/m\nlocking=Exclusive\n").vaults().unwrap()[0].locking, Some(Locking::Exclusive));
+        assert!(cfg("[a]\nfile=/x\nmountpoint=/m\nlocking=sometimes\n").vaults().is_err(), "bad locking");
         for bad in ["", "-x", ".x", "a b", "a/b", "a[b]"] {
             assert!(validate_alias(bad).is_err(), "{bad:?} should be rejected");
         }
@@ -445,10 +461,11 @@ mod tests {
         v.log_file = Some("/log".into());
         v.read_only = true;
         v.enforce_permissions = true;
+        v.locking = Some(Locking::Normal);
         c.upsert(&v);
         let text = c.to_text();
         assert!(text.starts_with("# coffer vault registry"));
-        assert!(text.ends_with("\n[work]\nfile = /data/work.coffer\nmountpoint = /mnt/work\nidle_timeout = 30m\ncompact_on_idle = 2h\npassword_file = /pw\npassword_command = pass show x = y\nlog_file = /log\nread_only = true\nenforce_permissions = true\n"));
+        assert!(text.ends_with("\n[work]\nfile = /data/work.coffer\nmountpoint = /mnt/work\nidle_timeout = 30m\ncompact_on_idle = 2h\npassword_file = /pw\npassword_command = pass show x = y\nlog_file = /log\nread_only = true\nenforce_permissions = true\nlocking = normal\n"));
         assert_eq!(cfg(&text).vaults().unwrap(), vec![v]);
     }
 

@@ -282,6 +282,113 @@ pub fn create_container(path: &Path, password: &str, max_size: u64) -> Result<()
 }
 
 pub fn open_db(path: &Path, password: &str, readonly: bool) -> Result<Connection> {
+    open_db_with(path, password, readonly, false)
+}
+
+/// How the mount daemon's connection locks the container (`--locking`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Locking {
+    /// Exclusive on a network filesystem, normal everywhere else.
+    Auto,
+    /// Always exclusive (see `open_db_for_mount`).
+    Exclusive,
+    /// SQLite's normal per-transaction locking, even on a network filesystem.
+    Normal,
+}
+
+impl Locking {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Locking::Auto => "auto",
+            Locking::Exclusive => "exclusive",
+            Locking::Normal => "normal",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Locking> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Locking::Auto),
+            "exclusive" => Some(Locking::Exclusive),
+            "normal" => Some(Locking::Normal),
+            _ => None,
+        }
+    }
+
+    /// Whether a mount of `container` should hold its locks exclusively.
+    pub fn exclusive_for(self, container: &Path) -> bool {
+        match self {
+            Locking::Auto => on_network_fs(container),
+            Locking::Exclusive => true,
+            Locking::Normal => false,
+        }
+    }
+}
+
+/// Whether `path` lives on a filesystem where a lock is a round trip to
+/// some other machine. FUSE counts too: sshfs and friends are the common
+/// case, and the price of a false positive on a local FUSE filesystem is
+/// only that check/info need an unmount there.
+#[cfg(target_os = "linux")]
+pub fn on_network_fs(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    const NETWORK_FS: &[i64] = &[
+        0x6969,      // NFS
+        0x517B,      // SMB
+        0xFF534D42,  // CIFS
+        0xFE534D42,  // SMB2
+        0x00C36400,  // Ceph
+        0x01021997,  // 9p
+        0x6B414653,  // AFS (kAFS)
+        0x5346414F,  // AFS (OpenAFS)
+        0x01161970,  // GFS2
+        0x7461636F,  // OCFS2
+        0x0BD00BD0,  // Lustre
+        0x65735546,  // FUSE (sshfs, glusterfs, ...)
+    ];
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    NETWORK_FS.contains(&(st.f_type as i64))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn on_network_fs(_path: &Path) -> bool {
+    false
+}
+
+/// The mount daemon's connection when it holds its locks exclusively
+/// (`Locking::exclusive_for`): like `open_db`, but in SQLite's EXCLUSIVE
+/// locking mode. In the normal mode SQLite takes and drops its fcntl()
+/// locks around every single transaction - and every FUSE call is at least
+/// one. On a local disk that's a few syscalls. On NFS each one is a LOCK +
+/// LOCKU round trip to the server, and the Linux client also drops its page
+/// cache for the file on every lock it takes, so the next read goes to the
+/// server too. That's hidden while the server grants the open a delegation,
+/// but once it recalls it (measured: hours into a mount, unprompted) every
+/// FUSE call costs four round trips - `git status` in a small repo went from
+/// 0.03s to 1.3s, until a remount got a fresh delegation.
+///
+/// EXCLUSIVE takes the locks on first access and keeps them until the
+/// connection closes, and - because it's set before the first WAL access -
+/// SQLite then keeps the WAL index in heap memory instead of an mmap()ed
+/// -shm file, so no per-transaction locking is left at all. The price:
+/// no other connection can open the container while it's mounted, which is
+/// why `backup` goes through the daemon (see ipc.rs) and `check`/`info`
+/// ask for an unmount. lock_exclusive() already rules out a second writer,
+/// so nothing that was safe before is lost.
+///
+/// Not for read-only mounts: an exclusive WAL connection needs a write lock
+/// on the file, which a read-only fd can't take (SQLITE_IOERR_LOCK), so
+/// those keep the normal mode.
+pub fn open_db_for_mount(path: &Path, password: &str, readonly: bool, exclusive: bool) -> Result<Connection> {
+    open_db_with(path, password, readonly, exclusive && !readonly)
+}
+
+fn open_db_with(path: &Path, password: &str, readonly: bool, exclusive: bool) -> Result<Connection> {
     if !path.is_file() {
         bail!("{} not found", path.display());
     }
@@ -298,6 +405,11 @@ pub fn open_db(path: &Path, password: &str, readonly: bool) -> Result<Connection
     let con = Connection::open_with_flags(&uri, flags)?;
     silence_sqlcipher_log(&con)?;
     con.execute_batch(&pragma_key_sql("key", password))?;
+    if exclusive {
+        // Must precede the first read below: only a connection that is
+        // already exclusive when it first touches the WAL skips the -shm file.
+        con.execute_batch("PRAGMA locking_mode = EXCLUSIVE;")?;
+    }
 
     let check: rusqlite::Result<String> = con.query_row(
         "SELECT value FROM meta WHERE key='schema_version'",
@@ -306,6 +418,11 @@ pub fn open_db(path: &Path, password: &str, readonly: bool) -> Result<Connection
     );
     let schema = match check {
         Ok(v) => v,
+        Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => bail!(
+            "{} is mounted - the mount holds it exclusively. Unmount it first, or for a copy \
+use `coffer backup`, which works through the running mount.",
+            path.display()
+        ),
         Err(_) => bail!("wrong password, or the file is not a coffer container"),
     };
     // A container written by a newer coffer is refused with a clear message
@@ -345,6 +462,74 @@ older coffer versions will no longer open it",
     con.execute_batch("PRAGMA cache_size = -131072;")?;
     con.set_prepared_statement_cache_capacity(64);
     Ok(con)
+}
+
+/// Raw (still encrypted) first page of `con`'s main database, read through
+/// the file descriptor SQLite already has open. Deliberately not by opening
+/// the file again: POSIX drops *all* of a process's fcntl() locks on a file
+/// the moment it closes *any* descriptor for it, so a plain open/read/close
+/// in the mount daemon would silently take away the exclusive mount's locks.
+pub fn read_first_page(con: &Connection) -> Result<Vec<u8>> {
+    use rusqlite::ffi;
+    let mut page = vec![0u8; 4096];
+    unsafe {
+        let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+        let rc = ffi::sqlite3_file_control(
+            con.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            &mut file as *mut *mut ffi::sqlite3_file as *mut std::ffi::c_void,
+        );
+        if rc != ffi::SQLITE_OK || file.is_null() || (*file).pMethods.is_null() {
+            bail!("no file handle for the container (SQLite error {rc})");
+        }
+        let Some(x_read) = (*(*file).pMethods).xRead else {
+            bail!("the container's file handle can't read");
+        };
+        let rc = x_read(file, page.as_mut_ptr() as *mut std::ffi::c_void, page.len() as i32, 0);
+        if rc != ffi::SQLITE_OK {
+            bail!("reading the container's first page (SQLite error {rc})");
+        }
+    }
+    Ok(page)
+}
+
+/// Checks `password` against a container's first page (see
+/// `read_first_page`) - for when an exclusive mount holds every lock, so
+/// nothing can open the container to find out. Page 1 carries the KDF salt
+/// and its own HMAC, and it's always a valid page in the main file (a newer
+/// copy may sit in the WAL, but under the same key - a rekey can't happen
+/// while mounted). Written to a scratch file in `scratch_dir` and keyed
+/// there; a wrong key fails page 1's HMAC check, exactly as a full open
+/// would.
+pub fn verify_password(page: &[u8], password: &str, scratch_dir: &Path) -> Result<bool> {
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let scratch = Scratch(scratch_dir.join(format!(".verify-{}-{nanos}", std::process::id())));
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&scratch.0)?.write_all(page)?;
+    }
+    let con = Connection::open(&scratch.0)?;
+    silence_sqlcipher_log(&con)?;
+    con.execute_batch(&pragma_key_sql("key", password))?;
+    con.execute_batch("PRAGMA cipher_page_size = 4096;")?;
+    // The header's schema cookie: reading it means decrypting page 1.
+    // With the right key page 1 decrypts and SQLite merely finds the
+    // database "malformed" (it's one page of many); with the wrong one the
+    // HMAC check fails first and it's "not a database".
+    match con.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0)) {
+        Ok(_) => Ok(true),
+        Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseCorrupt) => Ok(true),
+        Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::NotADatabase) => Ok(false),
+        Err(e) => Err(e).context("checking the password"),
+    }
 }
 
 pub fn read_max_size(con: &Connection) -> u64 {
@@ -615,6 +800,60 @@ mod tests {
         // Opening it again is a plain version-2 open, nothing left to do.
         let con = open_db(&path, "test-password", false).unwrap();
         assert_eq!(schema_version(&con).as_deref(), Some("2"));
+    }
+
+    /// What the NFS fix rests on: a mount connection never creates the
+    /// mmap()ed -shm file (whose locks were the per-transaction round
+    /// trips), and while it is open nothing else gets in - with a message
+    /// that says "mounted", not "wrong password".
+    #[test]
+    fn mount_connection_is_exclusive_and_skips_shm() {
+        let (dir, path) = temp_container();
+        let shm = dir.path().join("t.coffer-shm");
+        let con = open_db_for_mount(&path, "test-password", false, true).unwrap();
+        con.execute("UPDATE meta SET value=value WHERE key='max_size'", []).unwrap();
+        assert!(!shm.exists(), "exclusive WAL must keep its index in heap memory");
+        for readonly in [true, false] {
+            let err = open_db(&path, "test-password", readonly).unwrap_err().to_string();
+            assert!(err.contains("is mounted"), "{err}");
+        }
+        drop(con);
+        open_db(&path, "test-password", true).expect("free again once the mount connection closes");
+    }
+
+    /// Also the regression test for read_first_page: opening and closing the
+    /// container file in the mount's process would drop the mount's locks,
+    /// and the container would no longer be "mounted" to anyone else.
+    #[test]
+    fn verify_password_works_while_mounted_exclusively() {
+        let (dir, path) = temp_container();
+        let con = open_db_for_mount(&path, "test-password", false, true).unwrap();
+        con.execute("UPDATE meta SET value=value WHERE key='max_size'", []).unwrap();
+        let page = read_first_page(&con).unwrap();
+        assert!(verify_password(&page, "test-password", dir.path()).unwrap());
+        assert!(!verify_password(&page, "wrong", dir.path()).unwrap());
+        let err = open_db(&path, "test-password", true).unwrap_err().to_string();
+        assert!(err.contains("is mounted"), "the mount must still hold its locks: {err}");
+    }
+
+    #[test]
+    fn locking_auto_follows_the_filesystem() {
+        let dir = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
+        assert!(!Locking::Normal.exclusive_for(dir.path()));
+        assert!(Locking::Exclusive.exclusive_for(dir.path()));
+        assert_eq!(Locking::Auto.exclusive_for(dir.path()), on_network_fs(dir.path()));
+        assert_eq!(Locking::parse(" Exclusive "), Some(Locking::Exclusive));
+        assert_eq!(Locking::parse("sometimes"), None);
+    }
+
+    /// A read-only mount can't be exclusive (see open_db_for_mount) and
+    /// quietly keeps the normal mode, so another reader still gets in.
+    #[test]
+    fn read_only_mount_connection_works() {
+        let (_dir, path) = temp_container();
+        let con = open_db_for_mount(&path, "test-password", true, true).unwrap();
+        assert_eq!(read_max_size(&con), 0);
+        open_db(&path, "test-password", true).expect("not exclusive");
     }
 
     #[test]

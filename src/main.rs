@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod fs;
+mod ipc;
 
 use anyhow::{bail, Context, Result};
 use config::{Config, Vault};
@@ -90,6 +91,11 @@ enum Cmd {
         /// instead of only reporting them (FUSE default_permissions)
         #[arg(long)]
         enforce_permissions: bool,
+        /// How the mount locks the container file: `auto` (default) holds the
+        /// locks for the whole mount on a network filesystem such as NFS and
+        /// locks per operation everywhere else; `exclusive` / `normal` force one
+        #[arg(long, value_enum, value_name = "MODE")]
+        locking: Option<db::Locking>,
     },
     /// Unmount a container
     Umount {
@@ -126,6 +132,9 @@ enum Cmd {
         /// Always enforce the permission bits for this vault
         #[arg(long)]
         enforce_permissions: bool,
+        /// Default --locking for `coffer mount ALIAS`
+        #[arg(long, value_enum, value_name = "MODE")]
+        locking: Option<db::Locking>,
     },
     /// Forget a registered alias (the container file itself is left untouched)
     Remove { alias: String },
@@ -373,6 +382,7 @@ struct MountOpts {
     read_only: bool,
     log: Option<PathBuf>,
     enforce_permissions: bool,
+    locking: Option<db::Locking>,
 }
 
 impl MountOpts {
@@ -394,6 +404,7 @@ impl MountOpts {
         // of by alias - that never reads the registry.
         self.read_only = self.read_only || vault.read_only;
         self.enforce_permissions = self.enforce_permissions || vault.enforce_permissions;
+        self.locking = self.locking.or(vault.locking);
         self
     }
 }
@@ -501,7 +512,17 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
     }
     let abs_mountpoint = mountpoint.canonicalize()?;
 
+    let locking = opts.locking.unwrap_or(db::Locking::Auto);
+    if opts.read_only && locking == db::Locking::Exclusive {
+        eprintln!("coffer: note: --locking exclusive does not apply to read-only mounts, using normal locking");
+    }
+    let exclusive = !opts.read_only && locking.exclusive_for(&abs_file);
     let password = read_password_source(opts.password_file.as_deref(), opts.password_command.as_deref(), false)?;
+    // Opened normally even when the mount is to be exclusive: fcntl() locks
+    // belong to a process and don't survive the daemonizing fork below, so
+    // an exclusive connection opened here would go on believing it holds
+    // locks that left with the parent. The exclusive one is opened in the
+    // daemon itself, further down.
     let con = db::open_db(file, &password, opts.read_only)?;
     // A read-only open cannot upgrade the container, and the filesystem
     // needs the version-2 tables. `info`, `check` and `backup` still work
@@ -514,13 +535,29 @@ to upgrade it, or run `coffer compact` on it first",
         );
     }
     let max_size = db::read_max_size(&con);
+    // Nothing else can open an exclusively held container, so the mount
+    // itself takes `coffer backup` requests. Bound now, while a failure can
+    // still be printed; without it the mount still works, only backups have
+    // to wait for the unmount.
+    let ipc_server = if exclusive {
+        match ipc::bind(&abs_file) {
+            Ok(server) => Some(server),
+            Err(e) => {
+                eprintln!("coffer: warning: no control socket ({e:#}) - `coffer backup` will not work while mounted");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     println!(
-        "coffer: mounting {} at {}{}{}",
+        "coffer: mounting {} at {}{}{}{}",
         file.display(),
         mountpoint.display(),
         if opts.read_only { " (read-only)" } else { "" },
-        if opts.enforce_permissions { " (permissions enforced)" } else { "" }
+        if opts.enforce_permissions { " (permissions enforced)" } else { "" },
+        if exclusive { " (exclusive locking)" } else { "" }
     );
 
     let filesystem = fs::CofferFS::new(con, max_size, &abs_file, opts.read_only);
@@ -591,6 +628,24 @@ to upgrade it, or run `coffer compact` on it first",
     if let Some(timeout) = idle_timeout {
         spawn_idle_watcher(abs_mountpoint.clone(), last_activity.clone(), timeout);
     }
+    // Swapped in before session.run(), so no FUSE request has been handled
+    // yet. The old connection is closed first: while open it could hold a
+    // lock the exclusive one would then wait for.
+    let mut ipc_server = ipc_server;
+    if exclusive {
+        let mut con = connection_handle.lock().unwrap();
+        drop(std::mem::replace(&mut *con, rusqlite::Connection::open_in_memory()?));
+        *con = match db::open_db_for_mount(&abs_file, &password, false, true) {
+            Ok(ex) => ex,
+            Err(e) => {
+                log_line(&format!("exclusive locking failed ({e:#}), continuing with normal locking"));
+                ipc_server = None;
+                db::open_db(&abs_file, &password, false)?
+            }
+        };
+    }
+    drop(password);
+    let _socket = ipc_server.map(|server| server.spawn(connection_handle.clone()));
     if let Some(threshold) = compact_on_idle {
         spawn_compact_on_idle_watcher(connection_handle, last_activity, abs_file.clone(), threshold);
     }
@@ -1297,6 +1352,15 @@ fn cmd_check(file: &Path, password_file: Option<&Path>, password_command: Option
 
 fn cmd_backup(file: &Path, dest: &Path, password_file: Option<&Path>, password_command: Option<&str>) -> Result<()> {
     let password = read_password_source(password_file, password_command, false)?;
+    // A mount with exclusive locking (see db::open_db_for_mount) lets no
+    // other connection in, so it makes the copy itself.
+    let abs_file = file.canonicalize().with_context(|| file.display().to_string())?;
+    let abs_dest = std::path::absolute(dest)?;
+    if let Some(result) = ipc::request_backup(&abs_file, &abs_dest, &password) {
+        result.context("backup through the running mount")?;
+        println!("coffer: consistent backup written to {} (by the running mount)", dest.display());
+        return Ok(());
+    }
     let con = db::open_db(file, &password, true)?;
     let mut dest_con = rusqlite::Connection::open(dest)?;
     dest_con.execute_batch(&db::pragma_key_sql("key", &password))?;
@@ -1422,12 +1486,13 @@ fn main() -> Result<()> {
                     log_file: None,
                     read_only: false,
                     enforce_permissions,
+                    locking: None,
                 })?;
             }
             Ok(())
         }
-        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log, enforce_permissions } => {
-            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log, enforce_permissions };
+        Cmd::Mount { target, mountpoint, save, foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log, enforce_permissions, locking } => {
+            let opts = MountOpts { foreground, idle_timeout, compact_on_idle, password_file, password_command, read_only, log, enforce_permissions, locking };
             let (file, mountpoint, opts) = plan_mount(target.as_deref(), mountpoint, opts)?;
             if let Some(alias) = save {
                 let vault = Vault {
@@ -1441,14 +1506,15 @@ fn main() -> Result<()> {
                     log_file: opts.log.clone(),
                     read_only: opts.read_only,
                     enforce_permissions: opts.enforce_permissions,
+                    locking: opts.locking,
                 };
                 cmd_add(&mut Config::load()?, vault)?;
             }
             cmd_mount(&file, &mountpoint, opts)
         }
         Cmd::Umount { target } => cmd_umount(target.as_deref()),
-        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only, enforce_permissions } => {
-            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only, enforce_permissions };
+        Cmd::Add { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only, enforce_permissions, locking } => {
+            let vault = Vault { alias, file, mountpoint, idle_timeout, compact_on_idle, password_file, password_command, log_file, read_only, enforce_permissions, locking };
             cmd_add(&mut Config::load()?, vault)
         }
         Cmd::Remove { alias } => cmd_remove(&mut Config::load()?, &alias),

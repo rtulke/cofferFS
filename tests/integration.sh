@@ -252,6 +252,33 @@ INFO=$("$COFFER" info "$V" --password-file "$PW")
 eq "info counts files" "1" "$(echo "$INFO" | grep -c '^Files:')"
 
 # ---------------------------------------------------------------------------
+# What --locking auto picks on NFS, forced here so it is tested on any disk:
+# the mount holds its locks for its whole lifetime, so nothing else can open
+# the container and backup goes through the daemon's control socket.
+section "exclusive locking"
+sockets() { ls /run/user/"$(id -u)"/coffer/*.sock /tmp/coffer-"$(id -u)"/*.sock 2>/dev/null | sort; }
+SOCKETS_BEFORE=$(sockets)
+check "mount --locking exclusive" mnt "$V" "$MNT" --locking exclusive
+# fcntl() locks don't survive a fork, so this is what proves the daemon -
+# not the process that forked it - holds them.
+check "the daemon holds a POSIX lock on the container" bash -c "grep -q \"POSIX .* \$(pgrep -f 'coffer mount $V ' | head -1) [0-9a-f:]*:\$(stat -c %i '$V') \" /proc/locks"
+check "backup through the mount" bash -c "'$COFFER' backup '$V' '$WORK/backup-x.coffer' --password-file '$PW' | grep -q 'by the running mount'"
+expect_fail "backup with the wrong password" "$COFFER" backup "$V" "$WORK/backup-bad.coffer" --password-file "$PW2"
+check "wrong password left no file" test ! -e "$WORK/backup-bad.coffer"
+check "info says it is mounted" bash -c "'$COFFER' info '$V' --password-file '$PW' 2>&1 | grep -q 'is mounted'"
+check "writes go on while mounted" bash -c "echo still > '$MNT/x-after-backup'"
+check "umount"               umnt "$V" "$MNT"
+eq "socket removed on unmount" "$SOCKETS_BEFORE" "$(sockets)"
+check "exclusive backup passes check" "$COFFER" check "$WORK/backup-x.coffer" --password-file "$PW"
+check "mount the copy read-only" mnt "$WORK/backup-x.coffer" "$WORK/mnt2" --read-only
+check "copy has the tree"    diff -r "$WORK/src" "$WORK/mnt2/tree"
+check "umount the copy"      umnt "$WORK/backup-x.coffer" "$WORK/mnt2"
+check "container fine afterwards" "$COFFER" check "$V" --password-file "$PW"
+check "mount"                mnt "$V" "$MNT"
+check "rm the extra file"    rm "$MNT/x-after-backup"
+check "umount"               umnt "$V" "$MNT"
+
+# ---------------------------------------------------------------------------
 section "read-only mount"
 check "mount -r"           mnt "$V" "$MNT" -r
 check "mountinfo says ro"  bash -c "awk -v m='$MNT' '\$5 == m {print \$6}' /proc/self/mountinfo | grep -q '^ro,'"
