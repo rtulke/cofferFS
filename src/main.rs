@@ -687,7 +687,7 @@ fn spawn_idle_watcher(mountpoint: PathBuf, last_activity: Arc<AtomicU64>, timeou
                 mountpoint.display()
             ));
             match run_unmount(&mountpoint) {
-                Ok(status) if !status.success() => {
+                Ok((status, _)) if !status.success() => {
                     log_line(&format!("auto-unmount of {} failed: {status}", mountpoint.display()));
                 }
                 Err(e) => {
@@ -777,7 +777,9 @@ fn spawn_compact_on_idle_watcher(
 // same way it does on a normal unmount, so it exits cleanly and the lock is
 // released immediately. Whatever was still holding the mount gets I/O
 // errors, which is the honest outcome of an unmount the user asked for.
-fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
+// Returns the outcome and what the failing attempt printed (already shown
+// on stderr), so the caller can tell a permission problem from the rest.
+fn run_unmount(mountpoint: &Path) -> std::io::Result<(std::process::ExitStatus, String)> {
     // Looked up *before* detaching: once the lazy unmount has removed the
     // mountpoint from the mount table there's no way left to find out which
     // connection the daemon is sitting on.
@@ -787,8 +789,15 @@ fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
     // just "device or resource busy" en route to the lazy retry succeeding,
     // and showing that would look like a real error for what's actually a
     // routine escalation. If the lazy attempt fails too, its output is left
-    // visible - that's a genuine failure worth seeing.
-    let status = match which("fusermount3").or_else(|| which("fusermount")) {
+    // visible - that's a genuine failure worth seeing. In the C locale, so
+    // cmd_umount can recognize a permission error in it.
+    let lazy = |cmd: &mut std::process::Command| -> std::io::Result<(std::process::ExitStatus, String)> {
+        let out = cmd.env("LC_ALL", "C").stdin(std::process::Stdio::null()).output()?;
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        eprint!("{stderr}");
+        Ok((out.status, stderr))
+    };
+    let (status, stderr) = match which("fusermount3").or_else(|| which("fusermount")) {
         Some(fusermount) => {
             let status = std::process::Command::new(&fusermount)
                 .arg("-u")
@@ -797,13 +806,9 @@ fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
                 .stderr(std::process::Stdio::null())
                 .status()?;
             if status.success() {
-                return Ok(status);
+                return Ok((status, String::new()));
             }
-            std::process::Command::new(&fusermount)
-                .arg("-u")
-                .arg("-z")
-                .arg(mountpoint)
-                .status()?
+            lazy(std::process::Command::new(&fusermount).arg("-u").arg("-z").arg(mountpoint))?
         }
         None => {
             let status = std::process::Command::new("umount")
@@ -812,9 +817,9 @@ fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
                 .stderr(std::process::Stdio::null())
                 .status()?;
             if status.success() {
-                return Ok(status);
+                return Ok((status, String::new()));
             }
-            std::process::Command::new("umount").arg("-l").arg(mountpoint).status()?
+            lazy(std::process::Command::new("umount").arg("-l").arg(mountpoint))?
         }
     };
     if status.success() {
@@ -822,7 +827,7 @@ fn run_unmount(mountpoint: &Path) -> std::io::Result<std::process::ExitStatus> {
             abort_fuse_connection(id, mountpoint);
         }
     }
-    Ok(status)
+    Ok((status, stderr))
 }
 
 // Every one of coffer's own FUSE mounts currently visible, as (mountpoint,
@@ -892,6 +897,19 @@ fn is_mounted(mountpoint: &Path, mounts: &[(String, u32)]) -> bool {
     mount_key(mountpoint).is_some_and(|target| mounts.iter().any(|(mp, _)| *mp == target))
 }
 
+// Whether anything at all is mounted at `mountpoint` - not only coffer's
+// own mounts, so `coffer umount` keeps unmounting any FUSE mount of yours.
+// An unreadable mountinfo answers yes: then fusermount gets to decide.
+fn is_mountpoint(mountpoint: &Path) -> bool {
+    let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return true;
+    };
+    let Some(target) = mount_key(mountpoint) else {
+        return false;
+    };
+    mountinfo.lines().filter_map(|line| line.split(' ').nth(4)).any(|mp| unescape_mountinfo(mp) == target)
+}
+
 // mountinfo escapes space, tab, newline and backslash in paths as \040,
 // \011, \012 and \134 (octal), so a mountpoint like "/tmp/my vault" shows up
 // as "/tmp/my\040vault" and has to be decoded before comparing.
@@ -948,6 +966,9 @@ fn cmd_umount(target: Option<&str>) -> Result<()> {
                 println!("coffer: unmounting '{}' at {}", vault.alias, vault.mountpoint.display());
                 vault.mountpoint
             }
+            None if !is_mountpoint(Path::new(t)) => {
+                bail!("'{t}' is neither mounted nor a registered vault (see `coffer list`)")
+            }
             None => PathBuf::from(t),
         },
         None => {
@@ -965,8 +986,13 @@ fn cmd_umount(target: Option<&str>) -> Result<()> {
             vault.mountpoint
         }
     };
-    let status = run_unmount(&mountpoint)?;
-    if !status.success() {
+    // Asked here rather than left to fusermount, whose "entry for ... not
+    // found in /etc/mtab" reads like a broken system, not like "nothing to do".
+    if !is_mountpoint(&mountpoint) {
+        bail!("{} is not mounted", mountpoint.display());
+    }
+    let (status, stderr) = run_unmount(&mountpoint)?;
+    if !status.success() && (stderr.contains("Permission denied") || stderr.contains("Operation not permitted")) {
         hint_sudo_umount(&mountpoint);
     }
     std::process::exit(status.code().unwrap_or(1));

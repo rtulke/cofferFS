@@ -430,6 +430,11 @@ eq "completion: alias by prefix"      "pc" "$(completes mount p | head -1)"
 eq "completion: remove takes aliases only" "it pc" "$(completes remove "" | xargs)"
 eq "completion: no alias as backup destination" "0" "$(completes backup it "" | grep -cx -e it -e pc)"
 eq "completion: no alias as an option value" "0" "$(completes info --password-file "" | grep -cx -e it -e pc)"
+# Nothing mounted there: say so, rather than pass on fusermount's "entry
+# for ... not found in /etc/mtab" with a hint to try sudo.
+eq "umount of a path that isn't mounted says so" "Error: $MNT is not mounted" "$("$COFFER" umount "$MNT" 2>&1)"
+expect_fail "... and fails" "$COFFER" umount "$MNT"
+eq "umount of a name that is neither says so" "Error: 'no-such-vault' is neither mounted nor a registered vault (see \`coffer list\`)" "$("$COFFER" umount no-such-vault 2>&1)"
 
 # ---------------------------------------------------------------------------
 section "extended attributes"
