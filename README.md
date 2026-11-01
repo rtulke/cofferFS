@@ -276,7 +276,7 @@ there is something meaningful to reclaim.
 | `list` | Registered vaults and whether each is mounted | |
 | `info FILE\|ALIAS` | Counts and sizes | `--password-file`, `--password-command` |
 | `check FILE\|ALIAS` | Integrity check, read-only | `--password-file`, `--password-command` |
-| `backup FILE\|ALIAS DEST` | Consistent copy via SQLite's online backup | `--password-file`, `--password-command` |
+| `backup FILE\|ALIAS DEST` | Consistent copy via SQLite's online backup, with a progress bar on a terminal | `--password-file`, `--password-command` |
 | `passwd FILE\|ALIAS` | Change the password | `--password-file`, `--password-command`, `--new-password-file` |
 | `compact FILE\|ALIAS` | VACUUM, reclaims freed space | `--password-file`, `--password-command` |
 | `completions SHELL` | Print bash/zsh/fish completions | |

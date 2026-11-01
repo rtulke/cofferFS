@@ -5,9 +5,14 @@
 //!
 //! One request per connection: `backup\0DEST\0PASSWORD\0`, then the client
 //! shuts down its write side; the answer is a single `ok ...` or
-//! `error MESSAGE` line. The socket lives in a directory only its owner can
-//! enter, and the daemon additionally checks the peer's uid - the copy stays
-//! encrypted either way, but nobody else gets to have files written as you.
+//! `error MESSAGE` line. `backup-progress` instead of `backup` asks for
+//! `progress DONE TOTAL` lines (bytes) ahead of that answer, one per step;
+//! a client that stops listening to them aborts the copy. A daemon that
+//! predates them (coffer 0.2.0) answers `error malformed request`, and the
+//! client asks again the plain way. The socket lives in a directory only its
+//! owner can enter, and the daemon additionally checks the peer's uid - the
+//! copy stays encrypted either way, but nobody else gets to have files
+//! written as you.
 
 use crate::db;
 use anyhow::{bail, Context, Result};
@@ -27,8 +32,9 @@ use zeroize::Zeroizing;
 /// decrypt + re-encrypt. Between steps the FUSE loop gets the connection
 /// back, so a backup of a large container slows the mount down instead of
 /// freezing it for minutes. Writes made in between through the same
-/// connection are carried into the copy by SQLite itself.
-const PAGES_PER_STEP: i32 = 1024;
+/// connection are carried into the copy by SQLite itself. Also the
+/// granularity of the progress reports, here and in a direct backup.
+pub const PAGES_PER_STEP: i32 = 1024;
 
 /// Where the socket may live, in order: /run/user/UID (a per-user tmpfs
 /// that logind creates) and /tmp/coffer-UID for systems or sessions without
@@ -171,8 +177,13 @@ fn serve(stream: &mut UnixStream, con: &Mutex<Connection>, scratch_dir: &Path) -
     let mut req = Zeroizing::new(Vec::new());
     stream.take(64 * 1024).read_to_end(&mut req)?;
     let fields: Vec<&[u8]> = req.split(|b| *b == 0).collect();
-    let [b"backup", dest, password, b""] = fields.as_slice() else {
+    let [verb, dest, password, b""] = fields.as_slice() else {
         bail!("malformed request");
+    };
+    let with_progress = match *verb {
+        b"backup" => false,
+        b"backup-progress" => true,
+        _ => bail!("malformed request"),
     };
     let dest = PathBuf::from(std::ffi::OsString::from_vec(dest.to_vec()));
     if !dest.is_absolute() {
@@ -183,7 +194,11 @@ fn serve(stream: &mut UnixStream, con: &Mutex<Connection>, scratch_dir: &Path) -
     if !db::verify_password(&page, password, scratch_dir)? {
         bail!("wrong password");
     }
-    backup(con, &dest, password)
+    if with_progress {
+        backup(con, &dest, password, |done, total| Ok(writeln!(stream, "progress {done} {total}")?))
+    } else {
+        backup(con, &dest, password, |_, _| Ok(()))
+    }
 }
 
 fn errmsg(con: &Connection) -> String {
@@ -201,26 +216,43 @@ fn errmsg(con: &Connection) -> String {
 /// whole lifetime, which would mean holding the mount's mutex - and so
 /// stalling every FUSE call - for the entire copy. Here the mutex is held
 /// for one step at a time. The source is only ever touched with the mutex
-/// held, the destination only by this thread.
-fn backup(con: &Mutex<Connection>, dest: &Path, password: &str) -> Result<()> {
+/// held, the destination only by this thread. `progress` hears (bytes
+/// copied, bytes total) after every step; an error from it - the client
+/// went away - abandons the copy, and SQLite rolls the destination back.
+fn backup(con: &Mutex<Connection>, dest: &Path, password: &str, mut progress: impl FnMut(u64, u64) -> Result<()>) -> Result<()> {
     let dest_con = Connection::open(dest).with_context(|| format!("creating {}", dest.display()))?;
     dest_con.execute_batch(&db::pragma_key_sql("key", password))?;
     let main = c"main";
-    let b = {
+    let (b, page_size) = {
         let src = con.lock().unwrap();
-        unsafe { ffi::sqlite3_backup_init(dest_con.handle(), main.as_ptr(), src.handle(), main.as_ptr()) }
+        let page_size = db::page_size(&src)?;
+        (unsafe { ffi::sqlite3_backup_init(dest_con.handle(), main.as_ptr(), src.handle(), main.as_ptr()) }, page_size)
     };
     if b.is_null() {
         bail!("starting the backup: {}", errmsg(&dest_con));
     }
+    let mut abandoned = None;
     let rc = loop {
-        let rc = {
+        let (rc, remaining, pagecount) = {
             let _src = con.lock().unwrap();
-            unsafe { ffi::sqlite3_backup_step(b, PAGES_PER_STEP) }
+            let rc = unsafe { ffi::sqlite3_backup_step(b, PAGES_PER_STEP) };
+            unsafe { (rc, ffi::sqlite3_backup_remaining(b), ffi::sqlite3_backup_pagecount(b)) }
         };
+        let total = pagecount.max(0) as u64;
+        let done = total - (remaining.max(0) as u64).min(total);
         match rc {
-            ffi::SQLITE_OK => continue,
+            ffi::SQLITE_OK => {
+                if let Err(e) = progress(done * page_size, total * page_size) {
+                    abandoned = Some(e);
+                    break rc;
+                }
+            }
             ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED => std::thread::sleep(Duration::from_millis(20)),
+            ffi::SQLITE_DONE => {
+                // The copy is complete; whether the client still hears about it no longer matters.
+                let _ = progress(total * page_size, total * page_size);
+                break rc;
+            }
             rc => break rc,
         }
     };
@@ -228,6 +260,9 @@ fn backup(con: &Mutex<Connection>, dest: &Path, password: &str) -> Result<()> {
         let _src = con.lock().unwrap();
         unsafe { ffi::sqlite3_backup_finish(b) }
     };
+    if let Some(e) = abandoned {
+        return Err(e.context("backup abandoned"));
+    }
     if rc != ffi::SQLITE_DONE || finish != ffi::SQLITE_OK {
         bail!("backup failed: {}", errmsg(&dest_con));
     }
@@ -237,29 +272,54 @@ fn backup(con: &Mutex<Connection>, dest: &Path, password: &str) -> Result<()> {
 }
 
 /// Client side: if a mount daemon for `container` is listening on this
-/// host, has it write the backup and returns its outcome. None means no
-/// daemon answered - not mounted here, or mounted with normal locking -
-/// and the caller backs up directly, as before.
-pub fn request_backup(container: &Path, dest: &Path, password: &str) -> Option<Result<()>> {
+/// host, has it write the backup - telling `progress` (bytes copied, bytes
+/// total) as it goes - and returns its outcome. None means no daemon
+/// answered - not mounted here, or mounted with normal locking - and the
+/// caller backs up directly, as before.
+pub fn request_backup(container: &Path, dest: &Path, password: &str, progress: &mut dyn FnMut(u64, u64)) -> Option<Result<()>> {
     let name = socket_name(container);
-    let mut stream = candidate_dirs().into_iter().find_map(|d| UnixStream::connect(d.join(&name)).ok())?;
-    Some((|| {
-        let mut req = Zeroizing::new(Vec::new());
-        req.extend_from_slice(b"backup\0");
-        req.extend_from_slice(dest.as_os_str().as_bytes());
-        req.push(0);
-        req.extend_from_slice(password.as_bytes());
-        req.push(0);
-        stream.write_all(&req)?;
-        stream.shutdown(Shutdown::Write)?;
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).context("waiting for the mount daemon")?;
-        match line.trim_end() {
+    let connect = || candidate_dirs().into_iter().find_map(|d| UnixStream::connect(d.join(&name)).ok());
+    let stream = connect()?;
+    Some(match ask(stream, b"backup-progress", dest, password, progress) {
+        // A daemon from before progress reports; nothing was copied yet.
+        Err(e) if e.to_string() == "malformed request" => match connect() {
+            Some(stream) => ask(stream, b"backup", dest, password, progress),
+            None => Err(e),
+        },
+        result => result,
+    })
+}
+
+fn ask(mut stream: UnixStream, verb: &[u8], dest: &Path, password: &str, progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
+    let mut req = Zeroizing::new(Vec::new());
+    req.extend_from_slice(verb);
+    req.push(0);
+    req.extend_from_slice(dest.as_os_str().as_bytes());
+    req.push(0);
+    req.extend_from_slice(password.as_bytes());
+    req.push(0);
+    stream.write_all(&req)?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).context("waiting for the mount daemon")? == 0 {
+            bail!("the mount daemon closed the connection without an answer");
+        }
+        let line = line.trim_end();
+        if let Some((done, total)) = line.strip_prefix("progress ").and_then(|r| r.split_once(' ')) {
+            if let (Ok(done), Ok(total)) = (done.parse(), total.parse()) {
+                progress(done, total);
+            }
+            continue;
+        }
+        return match line {
             "ok" => Ok(()),
             l if l.starts_with("error ") => bail!("{}", &l["error ".len()..]),
             _ => bail!("the mount daemon closed the connection without an answer"),
-        }
-    })())
+        };
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +328,10 @@ mod tests {
 
     /// The daemon side end to end, minus FUSE: a writer keeps using the
     /// exclusive connection while the backup runs in steps, and the copy
-    /// opens with the password and contains everything.
+    /// opens with the password and contains everything. The writes go in
+    /// between the steps, from the progress report - where the mutex is
+    /// free, as it is for a FUSE call - so each one surely lands mid-copy;
+    /// a writer thread could just as well finish only after the copy.
     #[test]
     fn backup_through_an_exclusive_connection() {
         let dir = tempfile::tempdir().unwrap();
@@ -279,24 +342,49 @@ mod tests {
         for _ in 0..3000 {
             con.execute("INSERT INTO filler VALUES (randomblob(4000))", []).unwrap();
         }
-        let con = Arc::new(Mutex::new(con));
-        let writer = {
-            let con = con.clone();
-            std::thread::spawn(move || {
-                for _ in 0..200 {
-                    con.lock().unwrap().execute("INSERT INTO filler VALUES (randomblob(4000))", []).unwrap();
-                }
-            })
-        };
+        let con = Mutex::new(con);
         let dest = dir.path().join("b.coffer");
-        backup(&con, &dest, "pw").unwrap();
-        writer.join().unwrap();
+        let mut reports = Vec::new();
+        backup(&con, &dest, "pw", |done, total| {
+            reports.push((done, total));
+            if done < total {
+                for _ in 0..50 {
+                    con.lock().unwrap().execute("INSERT INTO filler VALUES (randomblob(4000))", [])?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
         let n_src: i64 = con.lock().unwrap().query_row("SELECT count(*) FROM filler", [], |r| r.get(0)).unwrap();
         drop(con);
         let copy = db::open_db(&dest, "pw", true).unwrap();
         let n_copy: i64 = copy.query_row("SELECT count(*) FROM filler", [], |r| r.get(0)).unwrap();
+        assert!(n_src > 3000, "the test has to write during the backup to mean anything");
         assert_eq!(n_copy, n_src, "writes made during the backup must be in the copy");
         assert!(db::open_db(&dest, "not-pw", true).is_err());
+        assert!(reports.len() > 1, "a copy of several steps reports more than once");
+        let &(done, total) = reports.last().unwrap();
+        assert_eq!(done, total, "the last report is the finished copy");
+        assert_eq!(total, std::fs::metadata(&dest).unwrap().len());
+    }
+
+    /// The client hanging up mid-copy abandons it instead of finishing a
+    /// copy nobody waits for.
+    #[test]
+    fn a_failing_progress_report_abandons_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("s.coffer");
+        db::create_container(&src, "pw", 0).unwrap();
+        let con = db::open_db_for_mount(&src, "pw", false, true).unwrap();
+        con.execute_batch("CREATE TABLE filler(x BLOB);").unwrap();
+        for _ in 0..3000 {
+            con.execute("INSERT INTO filler VALUES (randomblob(4000))", []).unwrap();
+        }
+        let con = Mutex::new(con);
+        let dest = dir.path().join("b.coffer");
+        let err = backup(&con, &dest, "pw", |_, _| bail!("broken pipe")).unwrap_err();
+        assert!(format!("{err:#}").contains("abandoned"), "{err:#}");
+        assert!(db::open_db(&dest, "pw", true).is_err(), "no half copy that opens like a backup");
     }
 
     #[test]

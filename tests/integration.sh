@@ -12,7 +12,7 @@
 #     tests/integration.sh                      # target/release/coffer
 #     COFFER=/usr/bin/coffer tests/integration.sh
 #
-# Linux only (FUSE). Needs fusermount3, rsync, flock, sha256sum, truncate,
+# Linux only (FUSE). Needs fusermount3, rsync, flock, sha256sum, truncate, script,
 # getfattr/setfattr (package attr) and python3. Set COFFER_PREV to an older
 # release's binary to also run the cross-version compatibility section.
 # Uses its own registry (COFFER_CONFIG) and a temp directory; never touches
@@ -263,6 +263,9 @@ check "mount --locking exclusive" mnt "$V" "$MNT" --locking exclusive
 # not the process that forked it - holds them.
 check "the daemon holds a POSIX lock on the container" bash -c "grep -q \"POSIX .* \$(pgrep -f 'coffer mount $V ' | head -1) [0-9a-f:]*:\$(stat -c %i '$V') \" /proc/locks"
 check "backup through the mount" bash -c "'$COFFER' backup '$V' '$WORK/backup-x.coffer' --password-file '$PW' | grep -q 'by the running mount'"
+# script(1) gives the backup a terminal, which is what turns the bar on.
+check "progress bar on a terminal" bash -c "script -qec \"'$COFFER' backup '$V' '$WORK/backup-p.coffer' --password-file '$PW'\" /dev/null | tr '\\r' '\\n' | grep -q '^\\[=*\\] 100%'"
+eq "no progress bar without one" "" "$("$COFFER" backup "$V" "$WORK/backup-q.coffer" --password-file "$PW" 2>&1 >/dev/null)"
 expect_fail "backup with the wrong password" "$COFFER" backup "$V" "$WORK/backup-bad.coffer" --password-file "$PW2"
 check "wrong password left no file" test ! -e "$WORK/backup-bad.coffer"
 check "info says it is mounted" bash -c "'$COFFER' info '$V' --password-file '$PW' 2>&1 | grep -q 'is mounted'"

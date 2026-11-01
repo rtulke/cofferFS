@@ -54,8 +54,9 @@ This was the main ask, so it's worth spelling out:
    SQLite's online backup API to make a byte-consistent copy — safe to run
    even while the container is mounted and being written to. (With
    exclusive locking, the default on NFS, the running mount makes the copy
-   itself - see **Locking on network filesystems**.) Cheap insurance;
-   consider cronning it.
+   itself - see **Locking on network filesystems**.) On a terminal it
+   shows a plain progress bar on stderr; from cron it stays quiet. Cheap
+   insurance; consider cronning it.
 4. **Wrong password fails loudly.** SQLCipher refuses to open the database
    at all if the passphrase is wrong (HMAC check on page 1 fails
    immediately) rather than silently returning garbage.
@@ -345,7 +346,8 @@ while it's mounted. `coffer backup` then goes through the mount daemon,
 which listens on a socket in `/run/user/UID/coffer/` (or
 `/tmp/coffer-UID/`) that only its owner can reach, checks the password
 against the container, and copies 4 MiB at a time so the mount keeps
-working during the backup. That socket is local, so the backup has to run
+working during the backup, reporting its progress back after each step
+(a client that hangs up, say on Ctrl+C, stops the copy). That socket is local, so the backup has to run
 on the machine where the container is mounted; from any other host it is
 refused like every other open (a backup across hosts was never safe
 anyway - SQLite's WAL doesn't work across machines). `coffer check` and

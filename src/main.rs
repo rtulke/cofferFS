@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod fs;
 mod ipc;
+mod progress;
 
 use anyhow::{bail, Context, Result};
 use config::{Config, Vault};
@@ -1263,10 +1264,7 @@ fn cmd_check(file: &Path, password_file: Option<&Path>, password_command: Option
     // needed for now. "PRAGMA integrity_check" below is authoritative: it actually
     // walks and decrypts every page to verify the B-tree structure, so if it
     // passes, the data is genuinely intact.
-    let page_size: u64 = con
-        .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
-        .map(|v| v as u64)
-        .or_else(|_| con.query_row("PRAGMA page_size", [], |r| r.get::<_, String>(0)).map(|s| s.parse().unwrap_or(4096)))?;
+    let page_size = db::page_size(&con)?;
     let boundary_page: u64 = (4 * 1024 * 1024 * 1024) / page_size;
 
     println!("Running SQLCipher page-level HMAC integrity check...");
@@ -1352,24 +1350,45 @@ fn cmd_check(file: &Path, password_file: Option<&Path>, password_command: Option
 
 fn cmd_backup(file: &Path, dest: &Path, password_file: Option<&Path>, password_command: Option<&str>) -> Result<()> {
     let password = read_password_source(password_file, password_command, false)?;
+    let mut bar = progress::Bar::new();
     // A mount with exclusive locking (see db::open_db_for_mount) lets no
     // other connection in, so it makes the copy itself.
     let abs_file = file.canonicalize().with_context(|| file.display().to_string())?;
     let abs_dest = std::path::absolute(dest)?;
-    if let Some(result) = ipc::request_backup(&abs_file, &abs_dest, &password) {
+    if let Some(result) = ipc::request_backup(&abs_file, &abs_dest, &password, &mut |done, total| bar.update(done, total)) {
         result.context("backup through the running mount")?;
+        bar.finish();
         println!("coffer: consistent backup written to {} (by the running mount)", dest.display());
         return Ok(());
     }
     let con = db::open_db(file, &password, true)?;
     let mut dest_con = rusqlite::Connection::open(dest)?;
     dest_con.execute_batch(&db::pragma_key_sql("key", &password))?;
+    // The copy runs in steps so there is progress to show, inside one read
+    // transaction so it stays a single snapshot: a step that had to start
+    // its own would see what a mount with normal locking wrote in between,
+    // and SQLite would start the copy over from the first page.
+    con.execute_batch("BEGIN")?;
+    let page_size = db::page_size(&con)?;
+    con.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
     {
+        use rusqlite::backup::StepResult;
         let backup = rusqlite::backup::Backup::new(&con, &mut dest_con)?;
-        // i32::MAX pages per step = copy everything in one step; the source is
-        // only ever opened read-only for this, so there's no writer to yield to.
-        backup.run_to_completion(i32::MAX, std::time::Duration::from_millis(0), None)?;
+        loop {
+            let step = backup.step(ipc::PAGES_PER_STEP)?;
+            let p = backup.progress();
+            let total = p.pagecount.max(0) as u64;
+            let done = total - (p.remaining.max(0) as u64).min(total);
+            bar.update(done * page_size, total * page_size);
+            match step {
+                StepResult::Done => break,
+                StepResult::More => {}
+                // Busy/Locked: retry shortly, as run_to_completion would.
+                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
     }
+    bar.finish();
     drop(dest_con);
     #[cfg(unix)]
     {

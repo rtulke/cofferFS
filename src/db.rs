@@ -541,6 +541,16 @@ pub fn read_max_size(con: &Connection) -> u64 {
     .unwrap_or(0)
 }
 
+/// Page size of the open container. Under SQLCipher `PRAGMA page_size`
+/// answers with its own `cipher_page_size` row, as text rather than an
+/// integer, so both are accepted.
+pub fn page_size(con: &Connection) -> Result<u64> {
+    con.query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
+        .map(|v| v as u64)
+        .or_else(|_| con.query_row("PRAGMA page_size", [], |r| r.get::<_, String>(0)).map(|s| s.parse().unwrap_or(4096)))
+        .map_err(Into::into)
+}
+
 pub fn now_secs() -> f64 {
     // A clock set before 1970 (dead CMOS battery, broken NTP at boot) would
     // otherwise panic here - and since this runs on nearly every FUSE call
