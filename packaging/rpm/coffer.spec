@@ -14,7 +14,7 @@
 # "Source packages" workflow builds and smoke-tests this file on Fedora and
 # EL whenever it changes and on every release tag.
 
-%global commit c8257cf16330c8641d20d4a4eaac8d420513dfe5
+%global commit bf075ac88ef9fb812b64355dded22305fa4d7dd0
 %global shortcommit %(c=%{commit}; echo ${c:0:7})
 # The release profile strips the binary (Cargo.toml), so find-debuginfo has
 # nothing to extract and EL's rpmbuild aborts on the empty debug source
@@ -22,7 +22,7 @@
 %global debug_package %{nil}
 
 Name:           coffer
-Version:        0.1.3
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Growable, user-mountable encrypted single-file containers
 
@@ -77,6 +77,10 @@ cargo test --release --locked
 %{_datadir}/fish/vendor_completions.d/coffer.fish
 
 %changelog
+* Sun Nov 01 2026 Robert Tulke <rt@debian.sh> - 0.2.0-1
+- Hard links (container format 2), exclusive locking on network
+  filesystems (--locking)
+
 * Fri Sep 18 2026 Robert Tulke <rt@debian.sh> - 0.1.3-1
 - Extended attributes, renameat2 flags, the full KILLPRIV_V2 contract,
   an end-to-end test suite

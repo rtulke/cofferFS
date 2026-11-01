@@ -1,6 +1,6 @@
 pkgbase = coffer
 	pkgdesc = Growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)
-	pkgver = 0.1.3
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/rtulke/cofferFS
 	arch = x86_64
@@ -13,7 +13,7 @@ pkgbase = coffer
 	depends = glibc
 	options = !lto
 	options = !debug
-	source = cofferFS-0.1.3.tar.gz::https://github.com/rtulke/cofferFS/archive/refs/tags/v0.1.3.tar.gz
-	sha256sums = 062785ddb6cad14396cbb9dc96d8b48b68ce686776573c894dc693c4c977fef3
+	source = cofferFS-0.2.0.tar.gz::https://github.com/rtulke/cofferFS/archive/refs/tags/v0.2.0.tar.gz
+	sha256sums = a3fc355aed1d4f15335aae6393003dbe9e70a35c40847fd3a132de5a1a252f57
 
 pkgname = coffer
