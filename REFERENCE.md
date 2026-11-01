@@ -356,9 +356,12 @@ Read-only mounts always use normal locking (an exclusive WAL connection
 needs a write lock, which a read-only file descriptor can't take).
 
 Two details the implementation has to get right, both because `fcntl()`
-locks belong to a process, not a file descriptor: the exclusive connection
-is opened only after `mount` has daemonized (the parent's locks would not
-survive the fork), and the daemon never opens the container file a second
+locks belong to a process, not a file descriptor: the daemon's connection,
+exclusive or not, is opened only after `mount` has daemonized (the
+parent's locks would not survive the fork - with normal locking the one
+lost would be the shared lock on the `-shm` file, and the next `info`,
+`check` or `backup` would reset the WAL index under the running mount),
+and the daemon never opens the container file a second
 time (closing *any* descriptor for a file drops *all* the process's locks
 on it - the password check reads page 1 through SQLite's own descriptor).
 

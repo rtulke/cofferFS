@@ -252,6 +252,31 @@ INFO=$("$COFFER" info "$V" --password-file "$PW")
 eq "info counts files" "1" "$(echo "$INFO" | grep -c '^Files:')"
 
 # ---------------------------------------------------------------------------
+# With normal locking the daemon has to hold SQLite's locks itself, not the
+# process that forked it: without the shared lock on byte 128 of the -shm
+# file, any other open of the container takes itself for its only user,
+# truncates the -shm under the daemon, and the daemon dies of SIGBUS at its
+# next write. Forced to normal so it is tested on NFS as well.
+section "normal locking: other opens while the mount writes"
+check "mount --locking normal" mnt "$V" "$MNT" --locking normal
+# Polled: the mount is up before the fork, the daemon's connection only after it.
+check "the daemon holds the WAL index lock" bash -c "for _ in \$(seq 1 25); do
+    grep -q \"POSIX .* READ \$(pgrep -f '^$COFFER mount $V ' | head -1) [0-9a-f:]*:\$(stat -c %i '$V-shm') 128 128\" /proc/locks && exit 0
+    sleep 0.2; done; exit 1"
+check "writes go on while info and backup open it" bash -c "
+    for i in \$(seq 1 100); do head -c 100000 /dev/urandom > '$MNT/busy'\$i || exit 1; done &
+    writer=\$!
+    for _ in 1 2 3 4 5; do '$COFFER' info '$V' --password-file '$PW' >/dev/null || exit 1; done
+    '$COFFER' backup '$V' '$WORK/backup-busy.coffer' --password-file '$PW' >/dev/null || exit 1
+    wait \$writer"
+check "the mount still answers" ls "$MNT"
+eq "every write arrived" "100" "$(ls "$MNT" | grep -c '^busy')"
+check "rm the files"         bash -c "rm '$MNT'/busy*"
+check "umount"               umnt "$V" "$MNT"
+check "container fine afterwards" "$COFFER" check "$V" --password-file "$PW"
+check "the copy made meanwhile passes check" "$COFFER" check "$WORK/backup-busy.coffer" --password-file "$PW"
+
+# ---------------------------------------------------------------------------
 # What --locking auto picks on NFS, forced here so it is tested on any disk:
 # the mount holds its locks for its whole lifetime, so nothing else can open
 # the container and backup goes through the daemon's control socket.

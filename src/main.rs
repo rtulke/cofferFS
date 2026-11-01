@@ -522,9 +522,9 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
     let password = read_password_source(opts.password_file.as_deref(), opts.password_command.as_deref(), false)?;
     // Opened normally even when the mount is to be exclusive: fcntl() locks
     // belong to a process and don't survive the daemonizing fork below, so
-    // an exclusive connection opened here would go on believing it holds
-    // locks that left with the parent. The exclusive one is opened in the
-    // daemon itself, further down.
+    // any connection opened here would go on believing it holds locks that
+    // left with the parent. This one checks the container before mounting;
+    // a daemon opens the one it serves from itself, further down.
     let con = db::open_db(file, &password, opts.read_only)?;
     // A read-only open cannot upgrade the container, and the filesystem
     // needs the version-2 tables. `info`, `check` and `backup` still work
@@ -630,20 +630,30 @@ to upgrade it, or run `coffer compact` on it first",
     if let Some(timeout) = idle_timeout {
         spawn_idle_watcher(abs_mountpoint.clone(), last_activity.clone(), timeout);
     }
-    // Swapped in before session.run(), so no FUSE request has been handled
-    // yet. The old connection is closed first: while open it could hold a
-    // lock the exclusive one would then wait for.
+    // A daemon needs a connection of its own, not just an exclusive mount:
+    // the one opened above lost its fcntl() locks to the fork, among them
+    // the shared lock on the -shm file that tells every other connection
+    // the WAL index is in use. Without it the next `coffer info`, `check`
+    // or `backup` takes itself for the only user, truncates the -shm the
+    // daemon still has mapped, and the daemon dies of SIGBUS at its next
+    // write. Swapped in before session.run(), so no FUSE request has been
+    // handled yet. The old connection is closed first: while open it could
+    // hold a lock the new one would then wait for.
     let mut ipc_server = ipc_server;
-    if exclusive {
+    if exclusive || !opts.foreground {
         let mut con = connection_handle.lock().unwrap();
         drop(std::mem::replace(&mut *con, rusqlite::Connection::open_in_memory()?));
-        *con = match db::open_db_for_mount(&abs_file, &password, false, true) {
-            Ok(ex) => ex,
-            Err(e) => {
-                log_line(&format!("exclusive locking failed ({e:#}), continuing with normal locking"));
-                ipc_server = None;
-                db::open_db(&abs_file, &password, false)?
+        *con = if exclusive {
+            match db::open_db_for_mount(&abs_file, &password, false, true) {
+                Ok(ex) => ex,
+                Err(e) => {
+                    log_line(&format!("exclusive locking failed ({e:#}), continuing with normal locking"));
+                    ipc_server = None;
+                    db::open_db(&abs_file, &password, false)?
+                }
             }
+        } else {
+            db::open_db(&abs_file, &password, opts.read_only)?
         };
     }
     drop(password);
