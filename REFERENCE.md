@@ -79,7 +79,7 @@ takes well under a second - `readdir()` reports a real file type per entry,
 so tools like `find` don't need an extra syscall per file just to answer
 `-type f`).
 
-See **Performance at scale** below for the full write-throughput benchmark.
+See **Performance** below for the write-throughput benchmark.
 
 
 ### Extended attributes
@@ -533,31 +533,72 @@ successfully, and hard-`kill -9`'d the mount process mid-write — the
 container stayed structurally intact (`check` clean) with every
 previously-written byte recoverable afterward.
 
-## Performance at scale (95,000 files, ~12GB)
+## Performance
 
-Benchmarked end to end at a realistic scale (95,000 files, mixed sizes
-averaging ~126KB, ~12GB total) against a plain ext4 baseline for context:
+Measured with coffer 0.2.1 on a local SSD (ext4, 4-core Intel with
+AES-NI, otherwise idle machine), the container and the source data on the
+same disk, one mount at a time. Every coffer time includes `coffer
+umount`, which waits until the mount has finished its last checkpoint, so
+nothing is still being written in the background when the clock stops.
 
-| | population (write) | `find -type f \| wc -l` |
+| | ext4 | coffer |
 |---|---|---|
-| ext4 (baseline) | 23.6s (4027 files/s, 509MB/s) | 0.05s |
-| Rust (before tuning) | 463.5s (205 files/s, 26MB/s) | 0.94s |
-| **Rust (tuned)** | **365.3s (260 files/s, 33MB/s)** | 0.94s |
+| one 2GiB file, `dd bs=1M` | 308MB/s | 61MB/s |
+| 10,000 files, 1.28GB (avg. ~128KB), `cp -r` | 147MB/s | 42MB/s (340 files/s) |
+| the same 10,000 files, `rsync -a` | - | 34MB/s (280 files/s) |
+| the same 10,000 files, `tar xf` | - | 3.2MB/s (26 files/s) |
+| reading the 10,000 files back (`tar cf -`) | - | 173MB/s |
 
-Reading/listing was never the bottleneck at any scale tested. `fuser`
-(this project's FUSE binding) negotiates a large `max_write` by default, so
-large writes never get chunked into many small FUSE calls in the first
-place. One real issue turned up while chasing write throughput at this
-scale, since fixed: every FUSE call was re-parsing its SQL. `src/fs.rs` now
-uses `Connection::prepare_cached` throughout instead of `execute`/`prepare`,
-and `PRAGMA cache_size` is raised from SQLite's ~2MB default to 128MB
-(SQLCipher has to re-decrypt+HMAC-verify a page every time it's evicted
-from cache and re-read, so a bigger cache means less redundant crypto work
-as the container grows). Together these cut the full 95,000-file/12GB run
-from 463s to 365s (~27% faster).
+Throughput does not drop as the container grows: writing six 2GiB files
+one after another into the same container, up to 12.7GB, gave 52-65MB/s
+for every one of them. Reading and listing were never the bottleneck at
+any scale tested (`find -type f | wc -l` over 95,000 files takes well
+under a second).
+
+How fast a write is depends mostly on how large the writes are that the
+program issues. coffer does not enable FUSE's writeback cache, so every
+`write()` reaches the mount on its own and becomes one SQLite
+transaction - which reads the affected 128KiB block, patches it and
+writes the whole block back. A 4KiB write therefore costs about as much
+as a 128KiB one:
+
+| `dd` write size | 4KiB | 64KiB | 128KiB | 1MiB | 8MiB |
+|---|---|---|---|---|---|
+| coffer | 2.1MB/s | 28MB/s | 51MB/s | 61MB/s | 61MB/s |
+
+`cp` and `rsync` write in large chunks and are unaffected; `tar` (10KB
+records), editors, databases and anything else that writes in small
+pieces are slow. Writes larger than 1MiB gain nothing, because the kernel
+caps a single FUSE write at 1MiB (`/proc/sys/fs/fuse/max_pages_limit`,
+256 pages by default) no matter how large a `max_write` `fuser` asks for.
+
+Where the time goes for large writes:
+
+- **Checkpoint fsyncs, not crypto.** The mount process is busy only
+  about half the time; the rest it waits for the `fsync()`s of SQLite's
+  WAL checkpoints. Since the FUSE loop is single-threaded, nothing else
+  happens meanwhile. With `PRAGMA synchronous = OFF` as an experiment the
+  same 2GiB write ran at 142MB/s with the process at 94% CPU - roughly
+  the ceiling for one thread. Checkpointing less often
+  (`wal_autocheckpoint = 10000`) did not help.
+- **Every byte is written twice**, once into the WAL and once into the
+  main file at checkpoint time: a 2GiB write puts about 4.4GB on disk.
+- **Encryption is cheap by comparison.** AES-256-CBC runs at about
+  1.2GB/s and SHA-512 at about 830MB/s on this machine (`openssl
+  speed`), which works out to roughly 4 of the 33 seconds a 2GiB write
+  takes.
+
+Two optimizations from an earlier round of tuning remain in place: every
+FUSE call used to re-parse its SQL, so `src/fs.rs` uses
+`Connection::prepare_cached` throughout, and `PRAGMA cache_size` is
+raised from SQLite's ~2MB default to 128MB (SQLCipher has to
+re-decrypt and HMAC-verify a page every time it is evicted from the cache
+and read again). Together they cut a 95,000-file/12GB population run from
+463s to 365s.
 
 Benchmark runs must be isolated to get repeatable numbers - run one mount
-at a time on an otherwise idle machine.
+at a time on an otherwise idle machine. On NFS the numbers above do not
+apply; see **Locking on network filesystems**.
 
 ## Known upstream SQLCipher bug (not ours, but worth knowing about)
 
@@ -620,6 +661,10 @@ copy.
   go through per-128KiB-block SQL statements. Great for documents, photos,
   typical file collections; you would want a different design (e.g. a
   dedicated blob store) if you're routinely storing many multi-GB files.
+- **Small writes are slow.** Without FUSE's writeback cache every
+  `write()` call rewrites a whole 128KiB block in its own transaction, so
+  programs that write in small pieces (`tar`, editors, databases) see a
+  few MB/s instead of the ~40-60MB/s `cp` gets - see **Performance**.
 - **The hard-link format bump is one-way.** Upgrading a container to
   format 2 (see **Hard links**) is done in place on the first writable
   mount and cannot be undone; coffer 0.1.x then refuses it. Take a
