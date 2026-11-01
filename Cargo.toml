@@ -25,7 +25,17 @@ keywords = ["fuse", "encryption", "sqlcipher", "container", "vault"]
 # Repository decoration nobody building from crates.io needs: the demo
 # animation and the social-preview card are a quarter of a megabyte of
 # images, and the CI workflows only mean anything inside the repository.
-exclude = ["docs/demo.gif", "docs/social-preview.png", ".github/"]
+# The last two entries are belt and braces: both are already untracked
+# via .git/info/exclude, and cargo honours that - but only while there is
+# a .git to read. Packaging from an export or a tarball copy would
+# otherwise sweep them in, and these two must never ship.
+exclude = [
+    "docs/demo.gif",
+    "docs/social-preview.png",
+    ".github/",
+    "CLAUDE.md",
+    ".claude/",
+]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
