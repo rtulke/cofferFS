@@ -516,8 +516,10 @@ is mounted.
 Print a shell completion script for
 .I shell
 .RI ( bash ", " zsh ", " fish ", " elvish ", or " powershell )
-to stdout. bash/zsh/fish completions are installed automatically by this
-package and by
+to stdout. For bash, zsh and fish this includes the aliases registered in
+.IR ~/.coffer/config ,
+offered wherever an alias is accepted. bash/zsh/fish completions are
+installed automatically by this package and by
 .BR "make install" ;
 this is only needed manually for a
 .B "PREFIX=$HOME/.local"

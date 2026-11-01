@@ -1,3 +1,4 @@
+mod completions;
 mod config;
 mod db;
 mod fs;
@@ -1462,8 +1463,7 @@ fn cmd_compact(file: &Path, password_file: Option<&Path>, password_command: Opti
 
 fn cmd_completions(shell: clap_complete::Shell) {
     let mut cmd = <Cli as clap::CommandFactory>::command();
-    let name = cmd.get_name().to_string();
-    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+    print!("{}", completions::generate(shell, &mut cmd));
 }
 
 fn main() -> Result<()> {
@@ -1477,6 +1477,17 @@ fn main() -> Result<()> {
     // SAFETY: prctl with PR_SET_DUMPABLE takes plain integers, no pointers.
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0);
+    }
+    // The registered aliases, one per line, for the shell completions
+    // (see completions.rs). Not a clap subcommand, hidden or not: the
+    // generated scripts would offer it at every <Tab> after `coffer`.
+    if std::env::args_os().nth(1).is_some_and(|a| a == "__complete-aliases") {
+        // Runs on every <Tab>: a missing or broken config completes
+        // nothing instead of printing an error into the command line.
+        for vault in Config::load().and_then(|c| c.vaults()).unwrap_or_default() {
+            println!("{}", vault.alias);
+        }
+        return Ok(());
     }
     let cli = Cli::parse();
     match cli.cmd {

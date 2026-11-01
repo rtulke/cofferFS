@@ -392,6 +392,19 @@ expect_fail "--password-command empty output" "$COFFER" info "$V" --password-com
 check "add --password-command alias" "$COFFER" add pc "$V" "$MNT" --password-command "cat $PW"
 check "mount via password_command" bash -c "'$COFFER' mount pc >/dev/null && wait_mounted '$MNT'"
 check "umount"             bash -c "'$COFFER' umount pc >/dev/null && wait_unmounted '$MNT' && wait_lock_free '$V'"
+# completes WORD... - what the bash completion offers for the last word,
+# one per line, run in $WORK (no file there is named like an alias)
+completes() {
+    (cd "$WORK" && bash -c 'source <("$0" completions bash)
+        COMP_WORDS=("$0" "$@"); COMP_CWORD=$#
+        _coffer_vaults "$0" "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}" 2>/dev/null
+        printf "%s\n" "${COMPREPLY[@]}"' "$COFFER" "$@")
+}
+eq "completion: aliases first"        "it pc" "$(completes backup "" | head -2 | xargs)"
+eq "completion: alias by prefix"      "pc" "$(completes mount p | head -1)"
+eq "completion: remove takes aliases only" "it pc" "$(completes remove "" | xargs)"
+eq "completion: no alias as backup destination" "0" "$(completes backup it "" | grep -cx -e it -e pc)"
+eq "completion: no alias as an option value" "0" "$(completes info --password-file "" | grep -cx -e it -e pc)"
 
 # ---------------------------------------------------------------------------
 section "extended attributes"

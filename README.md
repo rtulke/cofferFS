@@ -279,7 +279,7 @@ there is something meaningful to reclaim.
 | `backup FILE\|ALIAS DEST` | Consistent copy via SQLite's online backup, with a progress bar on a terminal | `--password-file`, `--password-command` |
 | `passwd FILE\|ALIAS` | Change the password | `--password-file`, `--password-command`, `--new-password-file` |
 | `compact FILE\|ALIAS` | VACUUM, reclaims freed space | `--password-file`, `--password-command` |
-| `completions SHELL` | Print bash/zsh/fish completions | |
+| `completions SHELL` | Print bash/zsh/fish completions (they also complete the registered aliases) | |
 
 Durations take `s`, `m`, `h`, `d` suffixes (`45s`, `30m`, `2h`). Sizes take
 `K`, `M`, `G`, `T`. `coffer --version` prints the version and the git
