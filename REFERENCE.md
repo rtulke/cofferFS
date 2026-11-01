@@ -67,9 +67,10 @@ well. Change the password any time with `coffer passwd <file>`.
 
 ### Handling many files
 
-File and directory metadata live in an indexed SQLite table
-(`UNIQUE(parent, name)` + an index on `parent`), so lookups and `readdir`
-stay fast regardless of how many files are inside. Reading/listing was never
+File and directory metadata live in two indexed SQLite tables: one row
+per inode, and one row per name in `dentries` (primary key
+`(parent, name)`, plus an index on the inode it points at), so lookups
+and `readdir` stay fast regardless of how many files are inside. Reading/listing was never
 the bottleneck at any scale tested (`find -type f | wc -l` over 95,000 files
 takes well under a second - `readdir()` reports a real file type per entry,
 so tools like `find` don't need an extra syscall per file just to answer
@@ -94,11 +95,11 @@ creates it when missing (`CREATE TABLE IF NOT EXISTS`), and a version of
 trigger created alongside the table (`xattrs_gc`, after delete on
 `inodes`) drops an inode's attributes whenever its row goes, and since the
 trigger lives in the database it also fires for an older `coffer` that
-unlinks the file, so no orphan rows are left behind either way. A
-read-only mount of a container that predates the table simply reports no
-attributes. Names must be valid UTF-8, like file names in a container.
-The integration suite exercises exactly this cross-version round trip
-against the 0.1.2 release, in both directions.
+unlinks the file, so no orphan rows are left behind either way. Since
+format 2 that cross-version path is gone: a container predating the table
+is format 1, and a read-only mount of one is refused outright, so
+`CofferFS` only ever runs against a container that has the table. Names
+must be valid UTF-8, like file names in a container.
 
 One consequence of answering `getxattr` at all: the kernel would then ask
 for `security.capability` before every buffered write, to know whether
@@ -115,6 +116,57 @@ request always wins over the drop. For writes the kernel says when;
 `fuser` surfaces no such flag for truncate and chown, so `coffer` applies
 the rule itself. Older kernels refuse the capability and keep the round
 trip.
+
+### Hard links
+
+A file can have several names. The name-to-inode mapping lives in its own
+table, `dentries`, instead of being a column on the inode, so `link(2)`
+is just another row and `unlink(2)` removes the inode only once its last
+name is gone. `stat` reports the real link count, `find -samefile` finds
+every name, `cp -l` and `rsync -aH` round-trip, and a write or a `chmod`
+through one name is visible through all of them, because there is only
+one inode. Directories keep reporting `nlink` 2 and `link(2)` on one is
+`EPERM`, as on any Linux filesystem.
+
+This is the one change so far that could not be made additive, so it
+bumps the container format from 1 to 2. Format 1 kept `parent` and `name`
+on the inode row itself, where a second name has nowhere to go. The first
+writable open of a format-1 container therefore migrates it: one
+transaction creates `dentries`, fills it from the existing rows, rewrites
+`inodes` without the two columns, and sets `meta.schema_version` to 2. A
+line on stderr says it is happening. The file content is not touched -
+only the inode table is rebuilt, so the cost scales with the number of
+files, not with how much data they hold. Two details are easy to get
+wrong and both are deliberate: the inode numbers are copied explicitly
+*and* the `AUTOINCREMENT` high-water mark is carried over before the old
+table is dropped (copying the surviving rows alone would lower it in any
+container whose newest file had since been deleted, and the next file
+would be handed a number already used), and the `xattrs` table is
+recreated afterwards because dropping the old `inodes` table takes the
+`xattrs_gc` trigger with it.
+
+It is not only `mount` that does this. Every writable open migrates, so
+`coffer passwd` and `coffer compact` upgrade a container too - which is
+why the refused read-only mount names `compact` as an alternative. Only
+`info`, `check` and `backup` open read-only and leave a format-1
+container exactly as it was.
+
+The migration is one-way, which is the honest part of the trade: coffer
+0.1.x compares `meta.schema_version` and refuses a format-2 container
+with "container format version 2, this coffer understands version 1 -
+upgrade coffer", so an older binary cannot misread the new layout. What
+still works with a format-1 container is everything that does not need to
+write: `info`, `check` and `backup`. A read-only mount is refused with a
+message naming the way out (mount it writable once), rather than failing
+somewhere deeper down where the reason would be unclear. `coffer backup`
+before the first writable mount is the way back, if a container has to
+stay readable by an older installation. The integration suite covers all
+of this against the 0.1.3 release - the last one on format 1, and the
+upgrade real installations will do: the upgrade keeps file contents,
+nested directories, symlinks and the extended attributes that the *older*
+binary wrote (which is the sharp end of it, since rebuilding the inodes
+table drops the `xattrs_gc` trigger and it has to come back), hard links
+work on the upgraded container, and the old binary refuses it afterwards.
 
 ### Permission enforcement
 
@@ -489,6 +541,10 @@ copy.
   go through per-128KiB-block SQL statements. Great for documents, photos,
   typical file collections; you would want a different design (e.g. a
   dedicated blob store) if you're routinely storing many multi-GB files.
+- **The hard-link format bump is one-way.** Upgrading a container to
+  format 2 (see **Hard links**) is done in place on the first writable
+  mount and cannot be undone; coffer 0.1.x then refuses it. Take a
+  `coffer backup` first if an older installation still has to open it.
 - **Deleted space isn't reclaimed automatically.** See **Reclaiming disk
   space** above - `coffer compact` handles this, but it's an occasional,
   manual step, not something that happens on its own.

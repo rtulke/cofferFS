@@ -4,12 +4,18 @@
 # name: the binary via [[bin]] below, the .deb and .rpm via the `name`
 # key in their metadata sections.
 name = "cofferfs"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 description = "Growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)"
 license = "MIT"
 authors = ["Robert Tulke <rt@debian.sh>"]
 repository = "https://github.com/rtulke/cofferFS"
+# Both appear in the crates.io sidebar and are the only links from there
+# to the project's own pages. `documentation` points at the handwritten
+# guide rather than docs.rs: this is a binary crate, so docs.rs would
+# only ever render an empty API page.
+homepage = "https://cofferfs.org"
+documentation = "https://cofferfs.org/docs/"
 # crates.io only accepts slugs from its own fixed list
 # (https://crates.io/category_slugs), at most five, and rejects the
 # publish outright on a typo. Keywords are free-form: five at most, 20

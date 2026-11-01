@@ -503,6 +503,16 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
 
     let password = read_password_source(opts.password_file.as_deref(), opts.password_command.as_deref(), false)?;
     let con = db::open_db(file, &password, opts.read_only)?;
+    // A read-only open cannot upgrade the container, and the filesystem
+    // needs the version-2 tables. `info`, `check` and `backup` still work
+    // on a version-1 container, so this only blocks the mount.
+    if db::schema_version(&con).as_deref() != Some(db::SCHEMA_VERSION) {
+        bail!(
+            "{} still uses container format 1; mount it writable once (without --read-only) \
+to upgrade it, or run `coffer compact` on it first",
+            file.display()
+        );
+    }
     let max_size = db::read_max_size(&con);
 
     println!(
@@ -1242,6 +1252,34 @@ fn cmd_check(file: &Path, password_file: Option<&Path>, password_command: Option
     }
     let structurally_ok = lines == ["ok"];
 
+    // Neither check above can see a logical inconsistency: both answer for
+    // pages and B-trees, not for what the rows mean. Since names live in
+    // their own table (container format 2), two things can in principle go
+    // wrong without a single corrupt page - a name pointing at an inode
+    // that is not there, and an inode no name points at, whose data blocks
+    // then occupy space nothing can reach. Neither should ever happen,
+    // which is exactly why it is worth saying so out loud.
+    let mut logically_ok = true;
+    if db::schema_version(&con).as_deref() == Some(db::SCHEMA_VERSION) {
+        println!("Checking that every name resolves and every file is reachable...");
+        match db::find_inconsistencies(&con) {
+            Ok((0, 0)) => println!("  OK: no dangling names, no unreachable files."),
+            Ok((dangling, unreachable)) => {
+                logically_ok = false;
+                if dangling != 0 {
+                    println!("  {dangling} name(s) point at an inode that does not exist");
+                }
+                if unreachable != 0 {
+                    println!("  {unreachable} file(s) have no name and cannot be reached");
+                }
+            }
+            Err(e) => {
+                logically_ok = false;
+                println!("  error: {e}");
+            }
+        }
+    }
+
     if known_limitation > 0 && structurally_ok {
         println!(
             "\nNote: {known_limitation} page(s) past the 4GB mark were misreported as corrupt \
@@ -1251,7 +1289,7 @@ fn cmd_check(file: &Path, password_file: Option<&Path>, password_command: Option
         );
     }
 
-    if !real_problems.is_empty() || !structurally_ok {
+    if !real_problems.is_empty() || !structurally_ok || !logically_ok {
         std::process::exit(1);
     }
     Ok(())

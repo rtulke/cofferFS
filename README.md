@@ -282,12 +282,25 @@ full.
   filesystem operation is one SQLite transaction. A hard kill mid-write
   loses at most the last unflushed write, never the container.
 - **Integrity.** SQLCipher HMACs every 4 KiB page; a wrong password fails
-  immediately instead of returning garbage. `coffer check` runs both the
-  cipher-level and the structural check.
-- **What is stored.** Files, directories, symlinks, permission bits,
-  ownership, timestamps and extended attributes (`user.*` and the rest,
-  up to 64 KiB per value like ext4), so `cp -a`, `rsync -aX` and desktop
-  tagging round-trip. Not hard links, yet.
+  immediately instead of returning garbage. `coffer check` runs the
+  cipher-level check, the structural one, and a consistency check of the
+  filesystem itself: every name resolves, every file is reachable.
+- **What is stored.** Files, directories, symlinks, hard links,
+  permission bits, ownership, timestamps and extended attributes
+  (`user.*` and the rest, up to 64 KiB per value like ext4), so `cp -a`,
+  `rsync -aHX` and desktop tagging round-trip.
+- **Container format.** Containers made by coffer 0.1.x use format 1,
+  which has no hard links. The first writable open by this version
+  upgrades such a container in place and prints a line saying so - one
+  transaction that rebuilds the inode table and leaves the file content
+  untouched, so it costs time in proportion to the number of files, not
+  to their size. "Writable" means `mount`, and also `passwd` and
+  `compact`. The upgrade is one-way: afterwards coffer 0.1.x refuses the
+  container with a clear message rather than misreading it, so take a
+  `coffer backup` first if an older installation still has to open it.
+  `info`, `check` and `backup` keep working on a format-1 container and
+  leave it alone; a read-only mount is refused, because it cannot do the
+  upgrade.
 - **Permission bits.** Stored and reported faithfully, but not checked by
   default: a file with mode `000` still opens. `--enforce-permissions`
   hands the check to the kernel, which makes `chmod` inside the container

@@ -24,22 +24,24 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq fuse3 rsync perl attr python3 >/dev/null
 
-      # v0.1.2, the last release without the xattrs table, installed as the
-      # "previous version" for the suite's cross-version section: containers
-      # must keep opening in both directions, and the additive-table path
-      # (an old container written by this version, then opened by the old
-      # one again) must actually be exercised - which is why this is pinned
-      # rather than "newest release": once a newer release has the table
-      # itself, those checks would silently stop testing what they claim.
+      # v0.1.3, the last release on container format 1, installed as the
+      # "previous version" for the suite's cross-version section. That is
+      # the upgrade real users will do, and because 0.1.3 already stores
+      # extended attributes it can write some *before* the migration - the
+      # migration rebuilds the inodes table and has to recreate the
+      # xattrs_gc trigger that goes with it, so those attributes are the
+      # sharpest thing to check afterwards. Pinned rather than "newest
+      # release": once a release is format 2 itself, these checks would
+      # silently stop testing the upgrade they claim to test.
       # The runner is Ubuntu 24.04, hence that package. Only in the upstream
       # repository: a fork has no releases to download.
-      - name: Install v0.1.2 for the compatibility checks
+      - name: Install v0.1.3 for the compatibility checks
         if: github.repository == 'rtulke/cofferFS'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download v0.1.2 --repo "$GITHUB_REPOSITORY" \
-            --pattern 'coffer_0.1.2-1_ubuntu2404_amd64.deb' --dir /tmp/prev
+          gh release download v0.1.3 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'coffer_0.1.3-1_ubuntu2404_amd64.deb' --dir /tmp/prev
           sudo apt-get install -y -qq /tmp/prev/coffer_*.deb >/dev/null
           /usr/bin/coffer --version
           echo "COFFER_PREV=/usr/bin/coffer" >> "$GITHUB_ENV"

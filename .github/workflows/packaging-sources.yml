@@ -6,8 +6,12 @@ name: Source packages
 # test as the release workflow. This catches a stale checksum, a missing
 # build dependency or a distro rust that is too old before an AUR/COPR
 # user does. Both files pin a tag, so this job tests the latest release,
-# not the commit being pushed; bump pkgver/Version in the same commit as
-# the version.
+# not the commit being pushed. That is also why their version is bumped
+# *after* tagging, never in the release commit itself: the tarball
+# checksum and the tag's commit hash do not exist until the tag does, so
+# pkgver/Version, _commit/%commit and sha256sums all move together in one
+# follow-up commit. Bumping the version here on its own would point this
+# job at a tag that is not pushed yet and turn it red.
 on:
   push:
     branches: [main]

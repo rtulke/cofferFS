@@ -52,6 +52,17 @@ daemon_pid()    { pgrep -f "coffer mount $1 " | head -1; }
 # stat only once that cache expires. Poll instead of hardcoding the TTL.
 wait_mode()     { for _ in $(seq 1 40); do [ "$(stat -c %a "$1")" = "$2" ] && return 0; sleep 0.25; done; return 1; }
 export -f wait_mode
+# Fills a directory with $2 files named f0000.. created in exactly the
+# reverse of their sorted order, so inode order is the opposite of name
+# order and a readdir that returned either one can be told from the other.
+# Reversed rather than shuffled on purpose: it is the sharpest case, and
+# it is the same every run (`shuf --random-source=/dev/zero` is not a
+# shuffle at all - it returns the input unchanged).
+fill_dir()      { mkdir -p "$1" || return 1; seq $(( $2 - 1 )) -1 0 \
+                      | while read -r i; do printf 'f%04d\n' "$i"; done \
+                      | while read -r n; do : > "$1/$n" || return 1; done; }
+link_many()     { : > "$1" || return 1; for i in $(seq 1 "$2"); do ln "$1" "$1-$i" || return 1; done; }
+export -f fill_dir link_many
 # A few checks run inside `bash -c` (to chain commands); functions and the
 # variables they use have to be exported to be visible there.
 export -f is_mounted wait_mounted wait_unmounted lock_free wait_lock_free
@@ -409,55 +420,126 @@ check "umount"             umnt "$V" "$MNT"
 check "check after xattrs" "$COFFER" check "$V" --password-file "$PW"
 
 # ---------------------------------------------------------------------------
-# Cross-version compatibility, when a previous release is available
-# (COFFER_PREV=/path/to/older/coffer): containers must open in both
-# directions, and what the newer version adds (the xattrs table) must not
-# get in the older one's way.
+section "hard links"
+check "mount"                 mnt "$V" "$MNT"
+check "a file to link to"     bash -c "echo linked > '$MNT/hl1'"
+eq "one name to start with"   "1" "$(stat -c %h "$MNT/hl1")"
+check "ln creates a second name" ln "$MNT/hl1" "$MNT/hl2"
+eq "link count is 2"          "2" "$(stat -c %h "$MNT/hl1")"
+eq "and the same from either name" "2" "$(stat -c %h "$MNT/hl2")"
+eq "same inode"               "$(stat -c %i "$MNT/hl1")" "$(stat -c %i "$MNT/hl2")"
+eq "same content"             "linked" "$(cat "$MNT/hl2")"
+check "a write through one name" bash -c "echo more >> '$MNT/hl1'"
+eq "is visible through the other" "2" "$(wc -l < "$MNT/hl2")"
+check "chmod through one name"   chmod 640 "$MNT/hl2"
+eq "shows on the other"       "640" "$(stat -c %a "$MNT/hl1")"
+check "a third name in a subdirectory" bash -c "mkdir -p '$MNT/hldir' && ln '$MNT/hl1' '$MNT/hldir/hl3'"
+eq "link count is 3"          "3" "$(stat -c %h "$MNT/hl1")"
+check "removing one name"     rm "$MNT/hl2"
+eq "leaves the others"        "2" "$(stat -c %h "$MNT/hl1")"
+eq "content still there"      "2" "$(wc -l < "$MNT/hldir/hl3")"
+check "renaming a name"       mv "$MNT/hldir/hl3" "$MNT/hldir/hl4"
+eq "does not change the count" "2" "$(stat -c %h "$MNT/hl1")"
+check "removing the first name" rm "$MNT/hl1"
+eq "the last name has count 1" "1" "$(stat -c %h "$MNT/hldir/hl4")"
+eq "and still the content"    "2" "$(wc -l < "$MNT/hldir/hl4")"
+expect_fail "hard-linking a directory is refused" ln "$MNT/hldir" "$MNT/hldirlink"
+expect_fail "linking onto an existing name is refused" bash -c "echo x > '$MNT/taken' && ln '$MNT/hldir/hl4' '$MNT/taken'"
+check "readdir sees both names of one inode" bash -c "ln '$MNT/hldir/hl4' '$MNT/hldir/hl5' && [ \"\$(ls '$MNT/hldir' | wc -l)\" = 2 ]"
+check "cp -l inside the mount"   bash -c "cp -l '$MNT/hldir/hl4' '$MNT/hldir/hl6'"
+eq "three names now"          "3" "$(stat -c %h "$MNT/hldir/hl4")"
+check "find -samefile finds them all" bash -c "[ \"\$(find '$MNT/hldir' -samefile '$MNT/hldir/hl4' | wc -l)\" = 3 ]"
+check "rsync -H preserves the link" bash -c "rm -rf '$WORK/hlout' && rsync -aH '$MNT/hldir/' '$WORK/hlout/' && [ \"\$(stat -c %h '$WORK/hlout/hl4')\" = 3 ]"
+check "umount"                umnt "$V" "$MNT"
+check "remount"               mnt "$V" "$MNT"
+eq "link count survives a remount" "3" "$(stat -c %h "$MNT/hldir/hl4")"
+eq "same inode after remount"  "$(stat -c %i "$MNT/hldir/hl4")" "$(stat -c %i "$MNT/hldir/hl6")"
+# One readdir call fills a fixed buffer, so a directory this size takes
+# several - and the entries come out ordered by name, which is what makes
+# the offset handed to the next call mean the same thing. 200 of the
+# entries below share a single inode, so an ordering that was not unique
+# within the directory would drop or repeat entries here.
+check "a directory too big for one readdir call" fill_dir "$MNT/bigdir" 600
+eq "every entry is listed once"  "600" "$(ls -U "$MNT/bigdir" | sort -u | wc -l)"
+# -U is readdir order, unsorted by ls: this is the filesystem's own answer.
+eq "readdir returns them in name order" "f0000" "$(ls -U "$MNT/bigdir" | head -1)"
+check "200 names on one inode in it" link_many "$MNT/bigdir/shared" 199
+eq "all of them are listed"      "800" "$(ls -U "$MNT/bigdir" | sort -u | wc -l)"
+eq "and the link count is right" "200" "$(stat -c %h "$MNT/bigdir/shared")"
+check "scandir sees each entry exactly once" bash -c "python3 -c 'import os,sys
+with os.scandir(sys.argv[1]) as it: n=[e.name for e in it]
+sys.exit(0 if len(n)==len(set(n))==800 else 1)' '$MNT/bigdir'"
+check "removing them all"        rm -r "$MNT/bigdir"
+check "deleting the whole directory" rm -r "$MNT/hldir" "$MNT/taken"
+check "umount"                umnt "$V" "$MNT"
+check "check after hard links" "$COFFER" check "$V" --password-file "$PW"
+check "and it really checked the filesystem" bash -c "'$COFFER' check '$V' --password-file '$PW' 2>&1 | grep -q 'no dangling names, no unreachable files'"
+
+# ---------------------------------------------------------------------------
+# Cross-version behaviour, when a previous release is available
+# (COFFER_PREV=/path/to/older/coffer). Since container format 2 the
+# contract changed: a container the older version made is upgraded on its
+# first writable open and is then no longer readable by that version - so
+# what is tested here is that the upgrade keeps everything, and that the
+# older version refuses the result cleanly instead of misreading it.
 if [ -n "${COFFER_PREV:-}" ] && [ -x "$COFFER_PREV" ]; then
-    section "compatibility with $("$COFFER_PREV" --version)"
+    section "upgrading a container from $("$COFFER_PREV" --version)"
     OLDV="$WORK/old.coffer"; OLDM="$WORK/mnt-old"; mkdir -p "$OLDM"
     check "previous version creates a container" "$COFFER_PREV" create "$OLDV" --password-file "$PW"
-    check "this version mounts it"    mnt "$OLDV" "$OLDM"
-    check "this version writes to it" bash -c "echo new > '$OLDM/from-new' && setfattr -n user.k -v v '$OLDM/from-new'"
-    check "umount"                    umnt "$OLDV" "$OLDM"
-    check "previous version checks it after our writes" "$COFFER_PREV" check "$OLDV" --password-file "$PW"
-    check "previous version mounts it" bash -c "'$COFFER_PREV' mount '$OLDV' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
-    eq "previous version reads our file" "new" "$(cat "$OLDM/from-new")"
-    check "previous version writes"   bash -c "echo old > '$OLDM/from-old'"
-    check "umount (previous version)" bash -c "'$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$OLDV'"
+    # Whether the previous release can store extended attributes decides
+    # what the upgrade has to carry over: the migration drops and recreates
+    # the inodes table, which takes the xattrs_gc trigger with it, so an
+    # attribute written by the *old* binary is the sharpest test of that.
+    # Still optional, so an older COFFER_PREV than 0.1.3 keeps working.
+    PREV_XATTR=no
+    check "previous version fills it" bash -c "'$COFFER_PREV' mount '$OLDV' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM' && mkdir -p '$OLDM/sub/deeper' && echo old > '$OLDM/from-old' && echo deep > '$OLDM/sub/deeper/f' && ln -s from-old '$OLDM/alink' && { setfattr -n user.old -v oldvalue '$OLDM/from-old' 2>/dev/null && echo yes > '$WORK/prev-xattr' || true; } && '$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$OLDV'"
+    [ -s "$WORK/prev-xattr" ] && PREV_XATTR=yes
+    echo "  (previous version stores xattrs: $PREV_XATTR)"
+    check "this version mounts it (and upgrades)" mnt "$OLDV" "$OLDM"
+    eq "the old file is there"    "old" "$(cat "$OLDM/from-old")"
+    eq "and the nested one"       "deep" "$(cat "$OLDM/sub/deeper/f")"
+    eq "the symlink too"          "from-old" "$(readlink "$OLDM/alink")"
+    if [ "$PREV_XATTR" = yes ]; then
+        eq "the old version's xattr survived the upgrade" "oldvalue" \
+            "$(getfattr -n user.old --only-values "$OLDM/from-old" 2>/dev/null)"
+    fi
+    check "and it is writable"    bash -c "echo new > '$OLDM/from-new' && setfattr -n user.k -v v '$OLDM/from-new'"
+    check "hard links work on the upgraded container" bash -c "ln '$OLDM/from-new' '$OLDM/from-new-2' && [ \"\$(stat -c %h '$OLDM/from-new')\" = 2 ]"
+    check "umount"                umnt "$OLDV" "$OLDM"
+    expect_fail "the previous version now refuses it" "$COFFER_PREV" check "$OLDV" --password-file "$PW"
+    check "and says why"          bash -c "'$COFFER_PREV' check '$OLDV' --password-file '$PW' 2>&1 | grep -q 'container format version 2'"
+    expect_fail "it cannot mount it either" bash -c "'$COFFER_PREV' mount '$OLDV' '$OLDM' --password-file '$PW'"
     check "this version mounts it again" mnt "$OLDV" "$OLDM"
-    eq "our xattr survived the round trip" "v" "$(getfattr -n user.k --only-values "$OLDM/from-new" 2>/dev/null)"
-    eq "previous version's file is there" "old" "$(cat "$OLDM/from-old")"
-    check "umount"                    umnt "$OLDV" "$OLDM"
-    # The previous version knows nothing about the xattrs table, so its
-    # unlink is a plain DELETE FROM inodes - the xattrs_gc trigger in the
-    # schema is what still takes the attribute rows with it. That the rows
-    # are really gone is asserted directly against the database by
-    # db::tests::deleting_an_inode_row_drops_its_xattrs; here we only check
-    # that the delete works and the container stays sound.
-    check "previous version deletes the file with our xattr" bash -c "'$COFFER_PREV' mount '$OLDV' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM' && rm '$OLDM/from-new' && '$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$OLDV'"
-    check "container still sound afterwards" "$COFFER_PREV" check "$OLDV" --password-file "$PW"
-    check "this version mounts it once more" mnt "$OLDV" "$OLDM"
-    expect_fail "the deleted file stays deleted" test -e "$OLDM/from-new"
-    check "re-create the same name"   bash -c "echo again > '$OLDM/from-new'"
-    expect_fail "no attribute resurfaces on it" getfattr -n user.k "$OLDM/from-new"
-    check "umount"                    umnt "$OLDV" "$OLDM"
-    check "previous version mounts this version's container" bash -c "'$COFFER_PREV' mount '$V' '$OLDM' --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
-    eq "previous version reads it" "250" "$(cat "$OLDM/many/f250")"
-    check "umount (previous version)" bash -c "'$COFFER_PREV' umount '$OLDM' >/dev/null && wait_unmounted '$OLDM' && wait_lock_free '$V'"
-    check "previous version checks this version's container" "$COFFER_PREV" check "$V" --password-file "$PW"
-    check "read-only mount of a container without the xattrs table" bash -c "'$COFFER_PREV' create '$WORK/old2.coffer' --password-file '$PW' >/dev/null && '$COFFER' mount '$WORK/old2.coffer' '$OLDM' -r --password-file '$PW' --log '$LOG' >/dev/null && wait_mounted '$OLDM'"
-    check "listxattr answers (empty) there" getfattr -d "$OLDM"
-    check "getxattr there is ENODATA, not EIO (python)" python3 - "$OLDM" <<'PY'
-import os, sys
-p = sys.argv[1]
-assert os.listxattr(p) == [], os.listxattr(p)
-try:
-    os.getxattr(p, "user.nope"); sys.exit("getxattr succeeded on a container without the table")
-except OSError as e:
-    assert e.errno == 61, e     # ENODATA, the "no such attribute" answer
-PY
-    check "umount"                    umnt "$WORK/old2.coffer" "$OLDM"
+    eq "everything is still there" "old" "$(cat "$OLDM/from-old")"
+    eq "our xattr survived"       "v" "$(getfattr -n user.k --only-values "$OLDM/from-new" 2>/dev/null)"
+    eq "and the hard link"        "2" "$(stat -c %h "$OLDM/from-new")"
+    check "the recreated xattrs trigger still collects" bash -c "setfattr -n user.gone -v g '$OLDM/sub/deeper/f' && rm '$OLDM/sub/deeper/f' && echo again > '$OLDM/sub/deeper/f' && [ -z \"\$(getfattr -d '$OLDM/sub/deeper/f' 2>/dev/null)\" ]"
+    check "umount"                umnt "$OLDV" "$OLDM"
+    check "upgraded container passes check" "$COFFER" check "$OLDV" --password-file "$PW"
+    # A read-only mount cannot upgrade, so it has to say so rather than
+    # fail with something unhelpful deeper down.
+    check "a fresh version-1 container"   bash -c "'$COFFER_PREV' create '$WORK/old2.coffer' --password-file '$PW' >/dev/null"
+    expect_fail "read-only mount of it is refused" bash -c "'$COFFER' mount '$WORK/old2.coffer' '$OLDM' -r --password-file '$PW'"
+    check "with a message naming the way out" bash -c "'$COFFER' mount '$WORK/old2.coffer' '$OLDM' -r --password-file '$PW' 2>&1 | grep -q 'container format 1'"
+    check "info still works on it"        "$COFFER" info "$WORK/old2.coffer" --password-file "$PW"
+    check "check still works on it"       "$COFFER" check "$WORK/old2.coffer" --password-file "$PW"
+    # The documented way back: a backup taken before the first writable
+    # mount is still format 1, so an older installation can open it.
+    check "backup of it still works"      "$COFFER" backup "$WORK/old2.coffer" "$WORK/old2-bk.coffer" --password-file "$PW"
+    check "and the previous version opens that backup" "$COFFER_PREV" check "$WORK/old2-bk.coffer" --password-file "$PW"
+    check "the original is untouched until then" "$COFFER_PREV" check "$WORK/old2.coffer" --password-file "$PW"
+    # Documented: it is not only mount. compact opens writable, so it
+    # upgrades too - which is what the refused read-only mount suggests.
+    check "a fresh version-1 container for compact" bash -c "'$COFFER_PREV' create '$WORK/old3.coffer' --password-file '$PW' >/dev/null"
+    check "compact upgrades it as well"   bash -c "'$COFFER' compact '$WORK/old3.coffer' --password-file '$PW' >/dev/null 2>&1"
+    expect_fail "and the previous version then refuses it" "$COFFER_PREV" check "$WORK/old3.coffer" --password-file "$PW"
+    # Into a file, not a pipe: a successful mount daemonizes, and grep -q
+    # closing the pipe on its first match pulls the stdio out from under
+    # the daemon. The upgrade line is printed before the fork either way.
+    check "a writable mount says it is upgrading" bash -c "'$COFFER' mount '$WORK/old2.coffer' '$OLDM' --password-file '$PW' > '$WORK/upgrade.log' 2>&1 && wait_mounted '$OLDM' && grep -q 'from container format 1 to 2' '$WORK/upgrade.log'"
+    check "umount"                umnt "$WORK/old2.coffer" "$OLDM"
+    check "read-only works afterwards" bash -c "'$COFFER' mount '$WORK/old2.coffer' '$OLDM' -r --password-file '$PW' >/dev/null && wait_mounted '$OLDM'"
+    check "umount"                umnt "$WORK/old2.coffer" "$OLDM"
 else
     echo
     echo "== compatibility: NOT RUN (no COFFER_PREV)"
@@ -465,8 +547,8 @@ else
         echo "  allowed by COFFER_PREV_OPTIONAL"
     else
         # A skipped cross-version section must not look like a green run:
-        # it is the only proof that containers keep opening in both
-        # directions. Set COFFER_PREV_OPTIONAL=1 where there is no previous
+        # it is the only proof that an older container still upgrades
+        # cleanly. Set COFFER_PREV_OPTIONAL=1 where there is no previous
         # release to test against (a fork, a first release).
         bad "cross-version section skipped (set COFFER_PREV, or COFFER_PREV_OPTIONAL=1 to allow)"
     fi

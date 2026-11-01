@@ -28,6 +28,12 @@ const XATTR_SIZE_MAX: usize = 65536;
 
 struct InodeRow {
     kind: i64,
+    /// How many directory entries point at this inode. Counted in the same
+    /// query that reads the row, so `to_attr` can report it without a
+    /// second round trip. A directory is reported as 2 straight from that
+    /// query: it can only ever have one name, and the second link every
+    /// Unix filesystem counts is its own `.` entry.
+    nlink: u32,
     mode: i64,
     uid: u32,
     gid: u32,
@@ -46,9 +52,14 @@ pub struct CofferFS {
     container_dir: PathBuf,
     last_activity: Arc<AtomicU64>,
     read_only: bool,
-    /// False only for a read-only mount of a container that predates the
-    /// xattrs table (see db::has_xattrs); every xattr call then answers as
-    /// if the file had none.
+    /// Whether the container has the xattrs table; every xattr call
+    /// answers as if the file had none when it does not. Since container
+    /// format 2 this is false only in one narrow case - a writable open
+    /// whose migration committed but whose following `XATTRS_SCHEMA`
+    /// failed - because a read-only mount of a format-1 container, the
+    /// case it was written for, is now refused before we get here. Kept
+    /// because that case still exists and the next writable open repairs
+    /// it, and because answering ENODATA beats answering EIO.
     has_xattrs: bool,
 }
 
@@ -102,10 +113,16 @@ fn map_row(r: &rusqlite::Row) -> rusqlite::Result<InodeRow> {
         mtime: r.get(7)?,
         ctime: r.get(8)?,
         symlink_target: r.get(9)?,
+        nlink: r.get::<_, i64>(10)? as u32,
     })
 }
 
-const SELECT_ROW_BY_INO: &str = "SELECT ino, kind, mode, uid, gid, size, atime, mtime, ctime, symlink_target FROM inodes WHERE ino=?1";
+// The link count is derived, never stored, so it cannot drift out of step
+// with the names that exist. Directories are skipped: `to_attr` reports a
+// constant 2 for them, and this runs on every lookup and getattr.
+const SELECT_ROW_BY_INO: &str = "SELECT ino, kind, mode, uid, gid, size, atime, mtime, ctime, symlink_target, \
+     CASE WHEN kind = 0 THEN 2 ELSE (SELECT count(*) FROM dentries WHERE dentries.ino = inodes.ino) END \
+     FROM inodes WHERE ino=?1";
 
 fn row_by_ino(con: &Connection, ino: u64) -> rusqlite::Result<Option<InodeRow>> {
     con.prepare_cached(SELECT_ROW_BY_INO)?
@@ -114,14 +131,14 @@ fn row_by_ino(con: &Connection, ino: u64) -> rusqlite::Result<Option<InodeRow>> 
 }
 
 fn child_ino(con: &Connection, parent: u64, name: &str) -> rusqlite::Result<Option<u64>> {
-    con.prepare_cached("SELECT ino FROM inodes WHERE parent=?1 AND name=?2")?
+    con.prepare_cached("SELECT ino FROM dentries WHERE parent=?1 AND name=?2")?
         .query_row(params![parent as i64, name], |r| r.get::<_, i64>(0))
         .optional()
         .map(|o| o.map(|v| v as u64))
 }
 
 fn has_children(con: &Connection, ino: u64) -> rusqlite::Result<bool> {
-    con.prepare_cached("SELECT 1 FROM inodes WHERE parent=?1 LIMIT 1")?
+    con.prepare_cached("SELECT 1 FROM dentries WHERE parent=?1 LIMIT 1")?
         .query_row(params![ino as i64], |_| Ok(()))
         .optional()
         .map(|o| o.is_some())
@@ -168,14 +185,45 @@ fn insert_child(
     let now = db::now_secs();
     let size = symlink_target.map(|s| s.len() as i64).unwrap_or(0);
     con.prepare_cached(
-        "INSERT INTO inodes (parent, name, kind, mode, uid, gid, size, atime, mtime, ctime, symlink_target) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8, ?9)",
+        "INSERT INTO inodes (kind, mode, uid, gid, size, atime, mtime, ctime, symlink_target) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6, ?7)",
     )?
-    .execute(params![parent as i64, name, kind, mode, uid, gid, size, now, symlink_target])?;
+    .execute(params![kind, mode, uid, gid, size, now, symlink_target])?;
     let new_ino = con.last_insert_rowid() as u64;
+    link_dentry(con, parent, name, new_ino, now)?;
+    Ok(new_ino)
+}
+
+/// Adds one name for an inode and marks the directory as modified. The
+/// primary key on (parent, name) is what refuses a duplicate name.
+fn link_dentry(con: &Connection, parent: u64, name: &str, ino: u64, now: f64) -> rusqlite::Result<()> {
+    con.prepare_cached("INSERT INTO dentries (parent, name, ino) VALUES (?1, ?2, ?3)")?
+        .execute(params![parent as i64, name, ino as i64])?;
     con.prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino=?2")?
         .execute(params![now, parent as i64])?;
-    Ok(new_ino)
+    Ok(())
+}
+
+/// Removes one name. The inode itself, its blocks and its attributes go
+/// only when that was the last name pointing at it - the whole point of
+/// hard links. The caller is inside a transaction, so a half-done unlink
+/// cannot be observed.
+fn unlink_dentry(con: &Connection, parent: u64, name: &str, ino: u64, now: f64) -> rusqlite::Result<()> {
+    con.prepare_cached("DELETE FROM dentries WHERE parent=?1 AND name=?2")?
+        .execute(params![parent as i64, name])?;
+    let remaining: i64 = con
+        .prepare_cached("SELECT count(*) FROM dentries WHERE ino=?1")?
+        .query_row(params![ino as i64], |r| r.get(0))?;
+    if remaining == 0 {
+        delete_inode(con, ino)?;
+    } else {
+        // Losing a name changes the inode's metadata, not its contents.
+        con.prepare_cached("UPDATE inodes SET ctime=?1 WHERE ino=?2")?
+            .execute(params![now, ino as i64])?;
+    }
+    con.prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino=?2")?
+        .execute(params![now, parent as i64])?;
+    Ok(())
 }
 
 /// A directory may only be removed, or replaced by a rename, while it is
@@ -287,7 +335,12 @@ fn to_attr(ino: u64, row: &InodeRow) -> FileAttr {
         crtime: secs_to_systemtime(row.ctime),
         kind: file_type_of(row.kind),
         perm: (row.mode & 0o7777) as u16,
-        nlink: if row.kind == KIND_DIR { 2 } else { 1 },
+        // Directories cannot be hard-linked, so the classic 2 ("." and the
+        // entry in the parent) is reported for them rather than counting
+        // subdirectories on every stat. Everything else reports its real
+        // number of names, which is what `rsync -H`, `cp -l` and
+        // `find -links` go by.
+        nlink: row.nlink,
         uid: row.uid,
         gid: row.gid,
         rdev: 0,
@@ -579,12 +632,7 @@ impl Filesystem for CofferFS {
             }
         };
         let now = db::now_secs();
-        let ok = delete_inode(&tx, ino).is_ok()
-            && tx
-                .prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino=?2")
-                .and_then(|mut s| s.execute(params![now, parent.0 as i64]))
-                .is_ok();
-        if !ok || tx.commit().is_err() {
+        if unlink_dentry(&tx, parent.0, name, ino, now).is_err() || tx.commit().is_err() {
             reply.error(Errno::EIO);
             return;
         }
@@ -629,12 +677,8 @@ impl Filesystem for CofferFS {
             return;
         }
         let now = db::now_secs();
-        let ok = delete_inode(&tx, ino).is_ok()
-            && tx
-                .prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino=?2")
-                .and_then(|mut s| s.execute(params![now, parent.0 as i64]))
-                .is_ok();
-        if !ok || tx.commit().is_err() {
+        // A directory always has exactly one name, so this is its last.
+        if unlink_dentry(&tx, parent.0, name, ino, now).is_err() || tx.commit().is_err() {
             reply.error(Errno::EIO);
             return;
         }
@@ -765,7 +809,9 @@ impl Filesystem for CofferFS {
                     reply.error(e);
                     return;
                 }
-                if delete_inode(&tx, existing).is_err() {
+                // Only the *name* goes here; the inode behind it survives
+                // if another name still points at it.
+                if unlink_dentry(&tx, newparent.0, newname, existing, db::now_secs()).is_err() {
                     reply.error(Errno::EIO);
                     return;
                 }
@@ -773,8 +819,8 @@ impl Filesystem for CofferFS {
         }
         let now = db::now_secs();
         let ok = tx
-            .prepare_cached("UPDATE inodes SET parent=?1, name=?2 WHERE ino=?3")
-            .and_then(|mut s| s.execute(params![newparent.0 as i64, newname, ino as i64]))
+            .prepare_cached("UPDATE dentries SET parent=?1, name=?2 WHERE parent=?3 AND name=?4")
+            .and_then(|mut s| s.execute(params![newparent.0 as i64, newname, parent.0 as i64, name]))
             .is_ok()
             && tx
                 .prepare_cached("UPDATE inodes SET mtime=?1, ctime=?1 WHERE ino IN (?2, ?3)")
@@ -1064,8 +1110,9 @@ impl Filesystem for CofferFS {
         let parent_ino: u64 = if ino.0 == ROOT_INO {
             ROOT_INO
         } else {
+            // A directory has exactly one name, so exactly one parent.
             match con
-                .prepare_cached("SELECT parent FROM inodes WHERE ino=?1")
+                .prepare_cached("SELECT parent FROM dentries WHERE ino=?1")
                 .and_then(|mut s| s.query_row(params![ino.0 as i64], |r| r.get::<_, i64>(0)))
             {
                 Ok(p) => p as u64,
@@ -1080,7 +1127,15 @@ impl Filesystem for CofferFS {
             (ino.0, FileType::Directory, ".".to_string()),
             (parent_ino, FileType::Directory, "..".to_string()),
         ];
-        let mut stmt = match con.prepare_cached("SELECT ino, name, kind FROM inodes WHERE parent=?1 ORDER BY ino") {
+        // Ordered by name, which the (parent, name) primary key already
+        // provides - so no temp B-tree per call, and readdir can be called
+        // again with an offset and get the same order. Ordering by inode
+        // would need one, and would no longer be unique anyway: two names
+        // in the same directory may share an inode now.
+        let mut stmt = match con.prepare_cached(
+            "SELECT d.ino, d.name, i.kind FROM dentries d JOIN inodes i ON i.ino = d.ino \
+             WHERE d.parent=?1 ORDER BY d.name",
+        ) {
             Ok(s) => s,
             Err(_) => {
                 reply.error(Errno::EIO);
@@ -1130,6 +1185,88 @@ impl Filesystem for CofferFS {
             }
         };
         reply.statfs(blocks, bfree, bavail, 0, 1_000_000, 4096, 255, 4096);
+    }
+
+    /// A second (third, ...) name for a file that already exists. The
+    /// kernel refuses to hard-link a directory before asking, but asks for
+    /// everything else, so the EPERM below is the belt to that suspenders -
+    /// a directory with two parents would turn the tree into a graph that
+    /// `rmdir` and `..` cannot reason about.
+    fn link(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        newparent: INodeNo,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        self.touch();
+        if self.read_only {
+            reply.error(Errno::EROFS);
+            return;
+        }
+        let Some(newname) = newname.to_str() else {
+            reply.error(Errno::EINVAL);
+            return;
+        };
+        let mut con = self.con.lock().unwrap();
+        let tx = match con.transaction() {
+            Ok(t) => t,
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        match row_by_ino(&tx, ino.0) {
+            Ok(Some(row)) if row.kind == KIND_DIR => {
+                reply.error(Errno::EPERM);
+                return;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        }
+        match child_ino(&tx, newparent.0, newname) {
+            Ok(Some(_)) => {
+                reply.error(Errno::EEXIST);
+                return;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        }
+        let now = db::now_secs();
+        let ok = link_dentry(&tx, newparent.0, newname, ino.0, now).is_ok()
+            && tx
+                .prepare_cached("UPDATE inodes SET ctime=?1 WHERE ino=?2")
+                .and_then(|mut s| s.execute(params![now, ino.0 as i64]))
+                .is_ok();
+        if !ok {
+            reply.error(Errno::EIO);
+            return;
+        }
+        // Read back inside the transaction so the reported link count is
+        // the one this call produced.
+        let attr = match row_by_ino(&tx, ino.0) {
+            Ok(Some(row)) => to_attr(ino.0, &row),
+            _ => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        if tx.commit().is_err() {
+            reply.error(Errno::EIO);
+            return;
+        }
+        reply.entry(&TTL, &attr, Generation(0));
     }
 
     fn setxattr(

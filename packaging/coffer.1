@@ -1,4 +1,4 @@
-.TH COFFER 1 "2026-09-18" "coffer 0.1.3" "User Commands"
+.TH COFFER 1 "2026-10-04" "coffer 0.2.0" "User Commands"
 .SH NAME
 coffer \- growable, user-mountable encrypted single-file containers
 .SH SYNOPSIS
@@ -122,6 +122,37 @@ Once mounted, the container behaves like an ordinary directory \-
 .BR mv (1),
 .BR rsync (1)
 and file managers all work normally against it.
+.PP
+Files, directories, symlinks and hard links are all stored, together with
+permission bits, ownership, timestamps and extended attributes, so
+.B cp \-a
+and
+.B rsync \-aHX
+round\-trip through a container.
+.PP
+Containers created by
+.B coffer
+0.1.x use container format 1, which has no hard links. The first writable
+open by this version upgrades such a container in place, in a single
+transaction, and says so on standard error. Only the inode table is
+rebuilt, so the cost scales with the number of files, not with the amount
+of data. Writable means
+.BR mount ,
+and also
+.B passwd
+and
+.BR compact .
+The upgrade is one\-way: afterwards a 0.1.x
+.B coffer
+refuses the container with a clear message instead of misreading it.
+.BR info ,
+.B check
+and
+.B backup
+open read\-only and leave a format\-1 container exactly as it was; a
+read\-only mount is refused, since it cannot perform the upgrade. Take a
+.B coffer backup
+first if an older installation still has to open the container.
 .PP
 Every command that opens an existing container (all except
 .BR create )
@@ -404,12 +435,14 @@ modified, and whether it is mounted right now.
 .TP
 .BI "check " file | alias
 Verify container integrity without modifying it: SQLCipher's per-page
-HMAC check followed by SQLite's structural
+HMAC check, then SQLite's structural
 .B integrity_check
 (authoritative for containers past 4\ GB \- see
 .B BUGS
-below). Exits non-zero if either check finds a real problem. Safe to run
-while
+below), and finally a consistency check of the filesystem itself \- that
+every name resolves to an inode that exists, and that every file is
+reachable under at least one name. Exits non-zero if any of them finds a
+real problem. Safe to run while
 .I file
 is mounted.
 .TP
@@ -502,13 +535,18 @@ container while it is open (mounted, or mid-command). Do not delete
 these while the container is in use; a clean unmount checkpoints and
 removes them.
 .SH SECURITY
-No root or sudo is required to create or mount a container. Unix
-permission bits stored inside a container are recorded and reported but
+No root or sudo is required to create or mount a container. Unless
+.B \-\-enforce\-permissions
+is given, Unix permission bits stored inside a container are recorded and
+reported but
 .B not
 enforced: whoever supplies the correct password gets full read/write
 access to everything inside. This matches a personal-container use case
-(comparable to VeraCrypt), not a multi-user shared filesystem. The FUSE
-mount itself is only accessible to the mounting user by default.
+(comparable to VeraCrypt), not a multi-user shared filesystem. Enforcement
+adds no secrecy either \- it only makes
+.BR chmod (1)
+inside the container mean what it says. The FUSE mount itself is only
+accessible to the mounting user by default.
 .SH BUGS
 SQLCipher has a confirmed upstream bug where
 .B "PRAGMA cipher_integrity_check"
