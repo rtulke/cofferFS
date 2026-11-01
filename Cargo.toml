@@ -4,7 +4,7 @@
 # name: the binary via [[bin]] below, the .deb and .rpm via the `name`
 # key in their metadata sections.
 name = "cofferfs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Growable, user-mountable encrypted single-file containers (SQLCipher + FUSE)"
 license = "MIT"
