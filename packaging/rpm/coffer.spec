@@ -14,7 +14,7 @@
 # "Source packages" workflow builds and smoke-tests this file on Fedora and
 # EL whenever it changes and on every release tag.
 
-%global commit 4fcd38377da51d667500c1d3545b55c04057ef83
+%global commit a96bd42cd2cf9192ffb7fc629bcdb7eda4133b1b
 %global shortcommit %(c=%{commit}; echo ${c:0:7})
 # The release profile strips the binary (Cargo.toml), so find-debuginfo has
 # nothing to extract and EL's rpmbuild aborts on the empty debug source
@@ -22,7 +22,7 @@
 %global debug_package %{nil}
 
 Name:           coffer
-Version:        0.2.1
+Version:        0.2.2
 Release:        1%{?dist}
 Summary:        Growable, user-mountable encrypted single-file containers
 
@@ -77,6 +77,11 @@ cargo test --release --locked
 %{_datadir}/fish/vendor_completions.d/coffer.fish
 
 %changelog
+* Wed Nov 18 2026 Robert Tulke <rt@debian.sh> - 0.2.2-1
+- The mount daemon unmounts on SIGTERM, SIGINT and SIGHUP, and mount
+  clears a dead mount left behind by a killed daemon; SQLCipher 4.20.0
+  and rustix 1.1.6 for RUSTSEC-2026-0502 and RUSTSEC-2026-0486
+
 * Sun Nov 01 2026 Robert Tulke <rt@debian.sh> - 0.2.1-1
 - Progress bar for backup, registered aliases in the shell completions;
   fixes a daemonized mount dying when another command opened the
