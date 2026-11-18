@@ -533,6 +533,24 @@ exits
 if it finds a genuine HMAC failure or a failing structural integrity
 check. Other commands exit non-zero on any error (wrong password,
 mountpoint not empty, I/O failure, etc.), with a message on stderr.
+.SH SIGNALS
+The mount daemon (and a
+.B \-\-foreground
+mount) treats
+.BR SIGTERM ", " SIGINT " and " SIGHUP
+as a request to unmount: it detaches the mountpoint, closes the container
+and exits
+.BR 0 ,
+exactly as after
+.BR "coffer umount" .
+.B SIGKILL
+cannot be caught. A daemon killed that way, or one that crashed, leaves a
+dead mount behind whose mountpoint answers "Transport endpoint is not
+connected"; the container itself is unharmed. The next
+.B coffer mount
+onto that mountpoint removes the dead mount by itself and says so, and
+.B coffer umount
+removes it as well.
 .SH ENVIRONMENT
 .TP
 .B COFFER_CONFIG

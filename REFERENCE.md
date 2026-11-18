@@ -465,6 +465,23 @@ of `--compact-on-idle`.
   saying so. The connection id is taken from `/proc/self/mountinfo` *before*
   detaching - deliberately not via `stat()`, which on a FUSE mountpoint is
   itself a FUSE request and hangs if the daemon is wedged.
+- The mount daemon treats `SIGTERM`, `SIGINT` and `SIGHUP` as a request to
+  unmount: a plain `kill`, Ctrl-C on a `--foreground` mount, or the signal a
+  login session sends its processes when it ends all go through the same
+  unmount path as `coffer umount` (lazy detach and connection abort
+  included), so the container is closed properly, the WAL is checkpointed
+  and the lock released. The signals are blocked in every thread and
+  collected by one dedicated thread in `sigwait()`, not by a signal handler,
+  so the unmount is ordinary code that may fork `fusermount3`. Should the
+  unmount itself fail, the daemon aborts its own FUSE connection instead,
+  which still ends the request loop and closes the container cleanly.
+- `SIGKILL` cannot be caught, and neither can a crash. What stays behind
+  then is a dead mount: still in the mount table, answering every access
+  with "Transport endpoint is not connected". The data is safe (see above),
+  only the mountpoint is unusable. `coffer mount` recognizes one of its own
+  dead mounts at the requested mountpoint, says so, removes it and carries
+  on; `coffer umount` removes it as well. A mount that still answers is
+  never touched.
 - Every `coffer` process marks itself non-dumpable (`PR_SET_DUMPABLE`):
   no core dumps, and no `ptrace` from other processes of the same user, so
   another program running under your account cannot read the password or

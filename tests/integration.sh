@@ -376,6 +376,51 @@ eq "500 files intact after crash" "500" "$(find "$MNT/many" -type f | wc -l)"
 check "umount"             umnt "$V" "$MNT"
 
 # ---------------------------------------------------------------------------
+# A killed daemon leaves its mount in the mount table, answering ENOTCONN.
+# The next mount onto it has to clear that away by itself instead of failing
+# with the "File exists" that mkdir reports for such a directory.
+section "dead mount left behind by a killed daemon"
+check "mount"              mnt "$V" "$MNT"
+PID=$(daemon_pid "$V")
+check "kill -9 daemon"     kill -9 "$PID"
+check "lock released after kill" wait_lock_free "$V"
+check "the dead mount is still in the mount table" is_mounted "$MNT"
+expect_fail "the dead mountpoint cannot be stat'ed" stat "$MNT"
+OUT=$("$COFFER" mount "$V" "$MNT" --password-file "$PW" --log "$LOG" 2>&1 >/dev/null); RC=$?
+eq "mount onto the dead mountpoint succeeds" "0" "$RC"
+check "and says what it removed" grep -q "daemon that is gone" <<<"$OUT"
+check "mounted"            wait_mounted "$MNT"
+check "tree readable on the new mount" diff -r "$WORK/src" "$MNT/tree"
+eq "exactly one mount at the mountpoint" "1" "$(awk -v m="$MNT" '$5 == m' /proc/self/mountinfo | wc -l)"
+check "umount"             umnt "$V" "$MNT"
+
+# ---------------------------------------------------------------------------
+# kill, Ctrl-C and a login session ending all send a signal the daemon can
+# act on: it has to unmount and close the container, not die mid-mount.
+section "termination signals unmount cleanly"
+for SIG in TERM HUP INT; do
+    check "mount"                          mnt "$V" "$MNT"
+    check "write"                          bash -c "echo $SIG > '$MNT/signalled'"
+    PID=$(daemon_pid "$V")
+    check "kill -$SIG daemon"              kill "-$SIG" "$PID"
+    check "SIG$SIG: unmounted"             wait_unmounted "$MNT"
+    check "SIG$SIG: lock released"         wait_lock_free "$V"
+    check "SIG$SIG: mountpoint is a plain directory again" test -d "$MNT"
+    check "SIG$SIG: WAL checkpointed and removed" test ! -e "$V-wal"
+done
+check "log mentions the signal" grep -q "signal 15, unmounting" "$LOG"
+"$COFFER" mount "$V" "$MNT" --foreground --password-file "$PW" >/dev/null 2>&1 &
+FG=$!
+check "foreground mount"   wait_mounted "$MNT"
+eq "the write before the last signal survived" "INT" "$(cat "$MNT/signalled")"
+check "SIGINT to the foreground mount" kill -INT "$FG"
+wait "$FG"; RC=$?
+eq "foreground mount exits 0 on SIGINT" "0" "$RC"
+check "foreground: unmounted"          wait_unmounted "$MNT"
+check "foreground: lock released"      wait_lock_free "$V"
+check "check passes afterwards" "$COFFER" check "$V" --password-file "$PW"
+
+# ---------------------------------------------------------------------------
 section "passwd, compact, max-size"
 check "passwd"             "$COFFER" passwd "$V" --password-file "$PW" --new-password-file "$PW2"
 expect_fail "old password refused" "$COFFER" info "$V" --password-file "$PW"

@@ -508,7 +508,8 @@ fn cmd_mount(file: &Path, mountpoint: &Path, opts: MountOpts) -> Result<()> {
 
     // Checked before the password prompt: "mountpoint is not empty" is
     // worth knowing before typing a passphrase, not after.
-    std::fs::create_dir_all(mountpoint)?;
+    clear_dead_mount(mountpoint)?;
+    std::fs::create_dir_all(mountpoint).with_context(|| format!("creating mountpoint {}", mountpoint.display()))?;
     if std::fs::read_dir(mountpoint)?.next().is_some() {
         bail!("mountpoint {} is not empty", mountpoint.display());
     }
@@ -606,6 +607,11 @@ to upgrade it, or run `coffer compact` on it first",
     // a permissions race, or any other mount(2)-time failure is reported
     // normally, synchronously, with a real exit code.
     let session = fuser::Session::new(filesystem, &abs_mountpoint, &config).context("failed to mount")?;
+    // From here on a SIGTERM, SIGINT or SIGHUP means "unmount", not "die
+    // with the mount still in the mount table" (see spawn_signal_watcher).
+    // Blocked now, in the only thread there is, so the mask is inherited by
+    // the daemonizing forks and by every thread spawned afterwards.
+    let termination_signals = block_termination_signals();
 
     if !opts.foreground {
         daemonize(log_file.as_ref())?;
@@ -627,6 +633,7 @@ to upgrade it, or run `coffer compact` on it first",
     // daemonized process. The FUSE session itself survives the fork fine
     // (it's just an open file descriptor plus ordinary heap data, not a
     // thread), which is what makes splitting Session::new from .run() safe.
+    spawn_signal_watcher(abs_mountpoint.clone(), termination_signals);
     if let Some(timeout) = idle_timeout {
         spawn_idle_watcher(abs_mountpoint.clone(), last_activity.clone(), timeout);
     }
@@ -667,6 +674,95 @@ to upgrade it, or run `coffer compact` on it first",
         log_line(&format!("unmounted {}", abs_mountpoint.display()));
     }
     Ok(())
+}
+
+// A coffer mount whose daemon is gone (kill -9, a crash, a login session
+// torn down around it) stays in the mount table, and everything that
+// touches the mountpoint gets ENOTCONN - including the mkdir/stat pair in
+// create_dir_all, which then reports a baffling "File exists". Nothing can
+// be using such a mount, so the next mount onto it simply removes it.
+//
+// Found via mountinfo first, so the stat below only ever goes to one of
+// coffer's own mounts; a mount that still answers is left alone.
+fn clear_dead_mount(mountpoint: &Path) -> Result<()> {
+    if !is_mounted(mountpoint, &coffer_mounts()) {
+        return Ok(());
+    }
+    match std::fs::metadata(mountpoint) {
+        Err(e) if e.raw_os_error() == Some(libc::ENOTCONN) => {}
+        _ => return Ok(()),
+    }
+    eprintln!(
+        "coffer: {} still carries the mount of a coffer daemon that is gone - removing it",
+        mountpoint.display()
+    );
+    let (status, _) = run_unmount(mountpoint)?;
+    if !status.success() {
+        bail!(
+            "could not remove the dead mount at {0}; try `coffer umount {0}` or `sudo umount -l {0}`",
+            mountpoint.display()
+        );
+    }
+    Ok(())
+}
+
+const TERMINATION_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
+
+/// Blocks the termination signals for the calling thread and returns the
+/// set, for spawn_signal_watcher to wait on. Child processes are not
+/// affected: std::process::Command starts them with an empty signal mask.
+fn block_termination_signals() -> libc::sigset_t {
+    // SAFETY: `set` is initialized by sigemptyset before any other use, and
+    // all three calls only read or write that local.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for sig in TERMINATION_SIGNALS {
+            libc::sigaddset(&mut set, sig);
+        }
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    }
+}
+
+// Turns a termination signal into an ordinary unmount. Without this a
+// plain `kill`, a Ctrl-C on a --foreground mount or the SIGTERM a login
+// session sends its processes on the way out ends the daemon on the spot:
+// the mount stays behind dead (ENOTCONN for everything that touches it,
+// see clear_dead_mount) and the WAL is never checkpointed. Unmounting
+// instead lets session.run() return the way it does after `coffer umount`,
+// so the connection is closed properly and the lock released.
+//
+// A dedicated thread in sigwait() rather than a signal handler: the signals
+// are blocked in every thread (block_termination_signals ran before any
+// was spawned), so they stay pending until this one collects them, and
+// what runs then is ordinary code, free to fork fusermount3.
+fn spawn_signal_watcher(mountpoint: PathBuf, signals: libc::sigset_t) {
+    std::thread::spawn(move || loop {
+        let mut sig: libc::c_int = 0;
+        // SAFETY: both pointers are valid for the duration of the call.
+        if unsafe { libc::sigwait(&signals, &mut sig) } != 0 {
+            continue;
+        }
+        log_line(&format!("signal {sig}, unmounting {}", mountpoint.display()));
+        // Looked up first: after a failed unmount this is what still gets
+        // the request loop to end, so the container is at least closed
+        // cleanly even if the mountpoint could not be detached.
+        let connection = fuse_connection_id(&mountpoint);
+        match run_unmount(&mountpoint) {
+            Ok((status, _)) if status.success() => return,
+            Ok((status, _)) => log_line(&format!("unmount of {} failed: {status}", mountpoint.display())),
+            Err(e) => log_line(&format!("unmount of {} failed: {e}", mountpoint.display())),
+        }
+        let aborted = connection
+            .is_some_and(|id| std::fs::write(format!("/sys/fs/fuse/connections/{id}/abort"), "1").is_ok());
+        if aborted {
+            return;
+        }
+        // Nothing left that would end the request loop: go the way the
+        // signal would have taken the process anyway.
+        std::process::exit(1);
+    });
 }
 
 // Every handled FUSE call refreshes CofferFS::last_activity (see fs.rs); this
